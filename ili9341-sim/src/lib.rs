@@ -1,9 +1,12 @@
 //! # Ilitek ILI9341 behavioral model
 //!
-//! A command-level model of the ILI9341 TFT LCD controller for host tests of the
-//! `ili9341-ng` driver. It decodes the command stream of the 4-wire SPI interface
-//! ([`FakeSpi`] plus a [`SimPin`] as `D/CX`) and of the 8-bit and 16-bit 8080-I parallel
-//! interfaces ([`SimPin`]s as data lines, `D/CX` and `WRX`).
+//! A command-level model of the ILI9341 TFT LCD controller, used in two places:
+//!
+//! - in host tests of the `ili9341-ng` driver, where it decodes the command stream of the
+//!   4-wire SPI interface ([`FakeSpi`] plus a [`SimPin`] as `D/CX`) and of the 8-bit and
+//!   16-bit 8080-I parallel interfaces ([`SimPin`]s as data lines, `D/CX` and `WRX`), and
+//! - wrapped into a [Wokwi](https://wokwi.com) custom chip (`sim/wokwi-chip`), which
+//!   shows [`Ili9341Model::panel_pixel`] on its display.
 //!
 //! The model implements the 18-bit frame memory, the column and page address window,
 //! `MADCTL` address mapping, 16-bit and 18-bit pixel data, sleep, display, inversion,
@@ -23,6 +26,11 @@
 //! - The 16-bit bus uses the default 18-bit transfer mode (`MDT = 00`): two bytes of the
 //!   8-bit pixel stream per word.
 //! - `MADCTL` `ML` (vertical refresh order) is ignored for scrolling and partial mode.
+//! - The panel shows frame memory as Wokwi's built-in ILI9341 part does: memory column 0
+//!   is the leftmost panel column, memory line 0 the bottom panel line. With the
+//!   driver's `MADCTL` values, the four orientations then look the same on both parts.
+//! - Areas the panel does not show (display off, sleep, outside the partial area) are
+//!   black.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -120,6 +128,7 @@ pub struct Ili9341Model {
     /// Top fixed, scrolling and bottom fixed lines.
     scroll_area: (u16, u16, u16),
     scroll_start: u16,
+    changes: u64,
 }
 
 impl Ili9341Model {
@@ -157,6 +166,7 @@ impl Ili9341Model {
             scrolling: false,
             scroll_area: (0, 0, 0),
             scroll_start: 0,
+            changes: 0,
         };
         model.reset();
         (model.busy_until_ns, model.sleep_toggle_at_ns) = (0, 0);
@@ -235,6 +245,55 @@ impl Ili9341Model {
         Some(line)
     }
 
+    /// The pixel the panel shows at column `x` (`0..240`) and row `y` (`0..320`, top
+    /// down) as 6-bit `[r, g, b]`, after scrolling, partial mode, display on/off, sleep
+    /// and inversion. `None` outside the panel.
+    pub fn panel_pixel(&self, x: u16, y: u16) -> Option<[u8; 3]> {
+        if x >= WIDTH || y >= HEIGHT {
+            return None;
+        }
+        if !self.display_on || self.sleeping {
+            return Some([0; 3]);
+        }
+        // Display line 0 is the bottom panel row.
+        let Some(line) = self.panel_line(HEIGHT - 1 - y) else {
+            return Some([0; 3]);
+        };
+        let pixel = self.gram_rgb666(x, line);
+        Some(if self.inverted {
+            pixel.map(|c| 63 - c)
+        } else {
+            pixel
+        })
+    }
+
+    /// A counter that increases with every word received and every reset; unchanged
+    /// means the panel shows the same picture.
+    pub fn changes(&self) -> u64 {
+        self.changes
+    }
+
+    /// Drives the active-low `RESX` line. Releasing it resets the controller; while it is
+    /// low, the controller ignores the bus.
+    pub fn set_reset_line(&mut self, high: bool) {
+        let released = high && self.in_reset;
+        self.in_reset = !high;
+        if released {
+            self.reset();
+        }
+    }
+
+    /// Whether an SPI read is in progress: the controller ignores `SDI` and shifts out
+    /// [`spi_read_byte`](Self::spi_read_byte).
+    pub fn spi_reading(&self) -> bool {
+        self.read.is_some()
+    }
+
+    /// Ends an SPI read; chip select deasserting does this.
+    pub fn spi_end_read(&mut self) {
+        self.read = None;
+    }
+
     /// The parameters last sent with a command, also for commands the model does not
     /// otherwise implement. Pixel data is not recorded.
     pub fn parameters(&self, command: u8) -> &[u8] {
@@ -266,6 +325,7 @@ impl Ili9341Model {
         self.command = None;
         self.pixel_byte_count = 0;
         self.read = None;
+        self.changes += 1;
         self.start_timing(true);
     }
 
@@ -286,6 +346,7 @@ impl Ili9341Model {
         if self.in_reset {
             return;
         }
+        self.changes += 1;
         if dc {
             self.receive_data(word);
         } else {
@@ -365,8 +426,8 @@ impl Ili9341Model {
         self.read = Some(Read::Bytes { data, len, pos: 0 });
     }
 
-    /// The next byte of the read in progress.
-    fn read_byte(&mut self) -> u8 {
+    /// The next byte of the SPI read in progress, or `0` without one.
+    pub fn spi_read_byte(&mut self) -> u8 {
         match self.read {
             Some(Read::Bytes { data, len, pos }) if pos < len => {
                 self.read = Some(Read::Bytes {
@@ -524,9 +585,8 @@ impl Ili9341Model {
 impl SpiTarget for Ili9341Model {
     fn select(&mut self) {}
 
-    /// Ends a read in progress.
     fn deselect(&mut self) {
-        self.read = None;
+        self.spi_end_read();
     }
 
     fn transfer(&mut self, mosi: u8) -> u8 {
@@ -534,8 +594,8 @@ impl SpiTarget for Ili9341Model {
             return 0;
         }
         // The chip ignores SDI while it shifts out a response.
-        if self.read.is_some() {
-            return self.read_byte();
+        if self.spi_reading() {
+            return self.spi_read_byte();
         }
         self.receive(mosi.into(), self.dc);
         0
@@ -596,6 +656,35 @@ mod tests {
             model.receive(pixel, true);
         }
         assert_eq!((model.gram(1, 5), model.gram(2, 5)), (0xC, 0xB));
+    }
+
+    #[test]
+    fn panel_shows_memory_bottom_up_and_display_state() {
+        let mut model = ready(InterfaceMode::Spi);
+        model.receive(Command::RAMWR.code().into(), false);
+        model.receive(0xF8, true); // Red at memory column 0.
+        model.receive(0x00, true);
+        let bottom_left = (0, HEIGHT - 1);
+        assert_eq!(
+            model.panel_pixel(bottom_left.0, bottom_left.1),
+            Some([0; 3]),
+            "display off"
+        );
+
+        model.receive(Command::DISPON.code().into(), false);
+        model.receive(Command::SLPOUT.code().into(), false);
+        assert_eq!(
+            model.panel_pixel(bottom_left.0, bottom_left.1),
+            Some([63, 0, 0])
+        );
+        assert_eq!(model.panel_pixel(0, 0), Some([0; 3]));
+        model.advance_ns(BUSY_NS);
+        model.receive(Command::INVON.code().into(), false);
+        assert_eq!(
+            model.panel_pixel(bottom_left.0, bottom_left.1),
+            Some([0, 63, 63])
+        );
+        assert_eq!(model.panel_pixel(WIDTH, 0), None);
     }
 
     #[test]

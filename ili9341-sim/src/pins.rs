@@ -56,13 +56,7 @@ impl<'a> SimPin<'a> {
                     model.receive(data, dc);
                 }
             }
-            Line::Reset => {
-                let released = high && model.in_reset;
-                model.in_reset = !high;
-                if released {
-                    model.reset();
-                }
-            }
+            Line::Reset => model.set_reset_line(high),
             Line::Data(n) => {
                 let bit = 1 << n;
                 model.data = if high {
