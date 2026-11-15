@@ -4,7 +4,7 @@ members = ["ili9341-registers", "ili9341-ng", "ili9341-sim"]
 exclude = ["sim/wokwi-chip", "examples"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Markus Mayer <widemeadows@gmail.com>"]
 license = "EUPL-1.2 OR MIT OR Apache-2.0"
 homepage = "https://github.com/sunsided/ili9341"
@@ -21,9 +21,9 @@ embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embassy-futures = "0.1.2"
 fake-bus = "0.1.0"
-ili9341-registers = { version = "0.1.0", path = "ili9341-registers" }
+ili9341-registers = { version = "0.2.0", path = "ili9341-registers" }
 # The driver's package name; its library is imported as `ili9341_ng`.
-ili9341-ng = { version = "0.1.0", path = "ili9341-ng" }
+ili9341-ng = { version = "0.2.0", path = "ili9341-ng" }
 ili9341-sim = { path = "ili9341-sim" }
 
 [workspace.lints.clippy]
