@@ -255,6 +255,14 @@ fn embedded_graphics_clips() {
     Pixel(Point::new(5, 5), Rgb565::GREEN)
         .draw(&mut display)
         .unwrap();
+    // A horizontal run longer than one batch, broken by an off-screen pixel and a jump.
+    let run = (0..40)
+        .map(|x| Pixel(Point::new(280 + x, 100), Rgb565::new(0, 0, x as u8 % 32)))
+        .chain([
+            Pixel(Point::new(-1, 100), Rgb565::RED),
+            Pixel(Point::new(0, 101), Rgb565::BLUE),
+        ]);
+    display.draw_iter(run).unwrap();
 
     let m = model.borrow();
     let red = Rgb565::RED.into_storage();
@@ -262,4 +270,9 @@ fn embedded_graphics_clips() {
     assert_eq!((m.gram(238, 10), m.gram(238, 11)), (1, 2));
     assert_eq!((m.gram(239, 10), m.gram(239, 11)), (3, 4));
     assert_eq!(m.gram(5, 5), Rgb565::GREEN.into_storage());
+    for x in 0..40u16 {
+        let expected = Rgb565::new(0, 0, (x % 32) as u8).into_storage();
+        assert_eq!(m.gram(100, 280 + x), expected, "x = {x}");
+    }
+    assert_eq!(m.gram(101, 0), Rgb565::BLUE.into_storage());
 }

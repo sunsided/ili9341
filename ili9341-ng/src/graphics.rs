@@ -23,14 +23,26 @@ impl<DI: Interface> DrawTarget for Ili9341<DI> {
     where
         I: IntoIterator<Item = Pixel<Rgb565>>,
     {
+        // Pixels that continue a row to the right are collected into one write, so a
+        // run costs one window setup instead of one per pixel.
         let bounds = self.bounding_box();
+        let mut run = [0; RUN_LEN];
+        let mut len = 0;
+        let mut start = Point::zero();
         for Pixel(point, color) in pixels {
-            if bounds.contains(point) {
-                // In bounds, so the coordinates fit into u16.
-                self.set_pixel(point.x as u16, point.y as u16, color.into_storage())?;
+            if !bounds.contains(point) {
+                continue;
             }
+            let continues = len > 0 && len < RUN_LEN && point == start + Point::new(len as i32, 0);
+            if !continues {
+                self.draw_run(start, &run[..len])?;
+                start = point;
+                len = 0;
+            }
+            run[len] = color.into_storage();
+            len += 1;
         }
-        Ok(())
+        self.draw_run(start, &run[..len])
     }
 
     fn fill_contiguous<I>(&mut self, area: &Rectangle, colors: I) -> Result<(), Self::Error>
@@ -62,6 +74,18 @@ impl<DI: Interface> DrawTarget for Ili9341<DI> {
 
     fn clear(&mut self, color: Rgb565) -> Result<(), Self::Error> {
         self.fill_screen(color.into_storage())
+    }
+}
+
+/// The most pixels [`DrawTarget::draw_iter`] collects into one write.
+const RUN_LEN: usize = 32;
+
+impl<DI: Interface> Ili9341<DI> {
+    /// Writes a horizontal run of on-screen pixels starting at `start`.
+    fn draw_run(&mut self, start: Point, run: &[u16]) -> Result<(), Error<DI::Error>> {
+        // On screen, so the coordinates and the length fit into u16.
+        let (x, y, width) = (start.x as u16, start.y as u16, run.len() as u16);
+        self.draw_pixels(x, y, width, 1, run.iter().copied())
     }
 }
 
