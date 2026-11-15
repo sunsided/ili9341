@@ -22,8 +22,8 @@ pub enum InterfaceError<B, P> {
 /// `asynch::Interface` when `SPI` implements the respective `SpiDevice`.
 #[derive(Debug)]
 pub struct SpiInterface<SPI, DC> {
-    spi: SPI,
-    dc: DC,
+    pub(crate) spi: SPI,
+    pub(crate) dc: DC,
 }
 
 impl<SPI, DC> SpiInterface<SPI, DC> {
@@ -228,12 +228,11 @@ macro_rules! interface {
             type Error = $crate::InterfaceError<SPI::Error, DC::Error>;
 
             $($asy)* fn send_command(&mut self, command: u8, parameters: &[u8]) -> Result<(), Self::Error> {
-                let (spi, dc) = self.parts();
-                dc.set_low().map_err($crate::InterfaceError::Pin)?;
-                spi.write(&[command]) $($aw)* .map_err($crate::InterfaceError::Bus)?;
+                self.dc.set_low().map_err($crate::InterfaceError::Pin)?;
+                self.spi.write(&[command]) $($aw)* .map_err($crate::InterfaceError::Bus)?;
                 if !parameters.is_empty() {
-                    dc.set_high().map_err($crate::InterfaceError::Pin)?;
-                    spi.write(parameters) $($aw)* .map_err($crate::InterfaceError::Bus)?;
+                    self.dc.set_high().map_err($crate::InterfaceError::Pin)?;
+                    self.spi.write(parameters) $($aw)* .map_err($crate::InterfaceError::Bus)?;
                 }
                 Ok(())
             }
@@ -242,8 +241,7 @@ macro_rules! interface {
             where
                 I: IntoIterator<Item = u16>,
             {
-                let (spi, dc) = self.parts();
-                dc.set_high().map_err($crate::InterfaceError::Pin)?;
+                self.dc.set_high().map_err($crate::InterfaceError::Pin)?;
 
                 // Each chunk is its own SPI transaction; the controller keeps writing
                 // memory across chip-select cycles until the next command.
@@ -253,12 +251,12 @@ macro_rules! interface {
                     buffer[len..len + 2].copy_from_slice(&pixel.to_be_bytes());
                     len += 2;
                     if len == buffer.len() {
-                        spi.write(&buffer) $($aw)* .map_err($crate::InterfaceError::Bus)?;
+                        self.spi.write(&buffer) $($aw)* .map_err($crate::InterfaceError::Bus)?;
                         len = 0;
                     }
                 }
                 if len > 0 {
-                    spi.write(&buffer[..len]) $($aw)* .map_err($crate::InterfaceError::Bus)?;
+                    self.spi.write(&buffer[..len]) $($aw)* .map_err($crate::InterfaceError::Bus)?;
                 }
                 Ok(())
             }
@@ -284,11 +282,4 @@ macro_rules! interface {
             }
         }
     };
-}
-
-impl<SPI, DC> SpiInterface<SPI, DC> {
-    /// Borrows the SPI device and `D/CX` separately.
-    pub(crate) fn parts(&mut self) -> (&mut SPI, &mut DC) {
-        (&mut self.spi, &mut self.dc)
-    }
 }

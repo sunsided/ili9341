@@ -118,11 +118,6 @@ impl Ili9341Model {
         model
     }
 
-    /// The bus the model listens on.
-    pub fn mode(&self) -> InterfaceMode {
-        self.mode
-    }
-
     /// The frame memory word at a memory column (`0..240`) and row (`0..320`), unaffected
     /// by `MADCTL`.
     pub fn gram(&self, column: u16, row: u16) -> u16 {
