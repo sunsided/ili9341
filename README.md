@@ -19,8 +19,12 @@
 
 The behavioral model in `ili9341-sim` decodes the command stream of the SPI and parallel
 interfaces into a frame memory, and enforces the datasheet's reset and sleep timing.
-Host tests run the driver against it. The example firmware in `examples/` runs against
-Wokwi's built-in ILI9341 part using `wokwi-cli`.
+Host tests run the driver against it. The example firmware in `examples/esp32c3` runs
+against Wokwi's built-in ILI9341 part using `wokwi-cli`.
+
+For the [Wokwi](https://wokwi.com) web editor, which no longer compiles Rust,
+[`examples/arduino-esp32c3`](examples/arduino-esp32c3/README.md) draws the same picture
+from an Arduino sketch with raw ILI9341 commands.
 
 ## Development
 
