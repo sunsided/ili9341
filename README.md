@@ -33,6 +33,9 @@ For the [Wokwi](https://wokwi.com) web editor, which no longer compiles Rust,
 [`examples/arduino-esp32c3`](examples/arduino-esp32c3/README.md) draws the same picture
 from an Arduino sketch with raw ILI9341 commands, on the built-in part or on the chip.
 
+**[Try it in the browser](https://wokwi.com/projects/480785747677505537)**: an ESP32-C3 drawing on the emulated ILI9341 chip on
+wokwi.com, and reading its display ID back.
+
 ## Development
 
 The [Taskfile](Taskfile.dist.yaml) wraps the common commands: `task check` and

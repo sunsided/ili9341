@@ -4,6 +4,8 @@ Wraps the [`ili9341-sim`](../../ili9341-sim) behavioral model into a
 [Wokwi custom chip](https://docs.wokwi.com/chips-api/getting-started) with a 240×320
 display.
 
+**[Live demo on wokwi.com](https://wokwi.com/projects/480785747677505537)**
+
 ```sh
 ./build.sh   # produces ili9341.chip.wasm next to ili9341.chip.json
 ```

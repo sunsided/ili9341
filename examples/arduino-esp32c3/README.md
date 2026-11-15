@@ -23,9 +23,7 @@ Two diagrams, one sketch:
 | GPIO5    | RST         |
 | 3V3      | VCC, LED    |
 
-Live project (built-in part): <TODO>
-
-Live project (ili9341-sim chip): <TODO>
+Live project (ili9341-sim chip): <https://wokwi.com/projects/480785747677505537>
 
 To recreate them on wokwi.com:
 
