@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["ili9341-registers", "ili9341-ng", "ili9341-sim"]
-exclude = ["examples"]
+exclude = ["sim/wokwi-chip", "examples"]
 
 [workspace.package]
 version = "0.1.0"
