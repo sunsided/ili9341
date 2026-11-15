@@ -5,3 +5,4 @@ Cargo.lock
 *.chip.wasm
 lcov.info
 /examples/*/screenshot*.png
+.task/
