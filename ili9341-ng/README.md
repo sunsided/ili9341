@@ -11,6 +11,10 @@
 
 > A platform-agnostic driver for the Ilitek ILI9341 240×320 TFT LCD controller.
 
+![The ESP32-C3 example on Wokwi's ILI9341: color bars, a circle and text](https://raw.githubusercontent.com/sunsided/ili9341/main/docs/screenshot.png)
+
+*The [ESP32-C3 example](https://github.com/sunsided/ili9341/tree/main/examples/esp32c3) in Wokwi, landscape orientation.*
+
 Built on [`embedded-hal`] 1.0 and the [`ili9341-registers`] command map. Enable the `async`
 feature for a driver on [`embedded-hal-async`], and `embedded-graphics` for a
 `DrawTarget<Color = Rgb565>`. The package is `ili9341-ng`; the library is imported as

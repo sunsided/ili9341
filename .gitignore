@@ -4,4 +4,4 @@ target/
 Cargo.lock
 *.chip.wasm
 lcov.info
-screenshot.png
+/examples/*/screenshot.png

@@ -5,6 +5,10 @@
 
 > Platform-agnostic Rust support for the Ilitek ILI9341 240×320 TFT LCD controller.
 
+![The ESP32-C3 example on Wokwi's ILI9341: color bars, a circle and text](https://raw.githubusercontent.com/sunsided/ili9341/main/docs/screenshot.png)
+
+*The [ESP32-C3 example](https://github.com/sunsided/ili9341/tree/main/examples/esp32c3) in Wokwi, landscape orientation.*
+
 | Crate                                        | Description                                                        |
 |----------------------------------------------|--------------------------------------------------------------------|
 | [`ili9341-registers`](ili9341-registers)     | The ILI9341 command set and parameter layouts.                     |
