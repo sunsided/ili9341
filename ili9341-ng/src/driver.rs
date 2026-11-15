@@ -217,8 +217,9 @@ macro_rules! driver {
                 height: u16,
                 color: u16,
             ) -> Result<(), $crate::Error<DI::Error>> {
-                let count = usize::from(width) * usize::from(height);
-                self.draw_pixels(x, y, width, height, core::iter::repeat_n(color, count)) $($aw)*
+                // Per row: `width * height` overflows a 16-bit `usize` for a full screen.
+                let pixels = (0..height).flat_map(|_| core::iter::repeat_n(color, width.into()));
+                self.draw_pixels(x, y, width, height, pixels) $($aw)*
             }
 
             /// Fills the whole screen with one color.

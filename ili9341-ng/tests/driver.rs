@@ -93,6 +93,16 @@ fn orientations_rotate_the_origin() {
 }
 
 #[test]
+fn fill_screen_reaches_the_last_pixel() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display.fill_screen(0xFFFF).unwrap();
+    let m = model.borrow();
+    assert_eq!(m.gram(0, 0), 0xFFFF);
+    assert_eq!(m.gram(WIDTH - 1, HEIGHT - 1), 0xFFFF);
+}
+
+#[test]
 fn draw_pixels_streams_row_by_row() {
     let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
     let mut display = init(&model, spi(&model));
