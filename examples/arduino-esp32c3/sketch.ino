@@ -2,13 +2,16 @@
 //
 // Draws the same picture as the Rust example in ../esp32c3 with raw ILI9341 commands
 // over SPI, and prints the same serial line. The command codes and the init sequence
-// are those of the ili9341-registers and ili9341-ng crates.
-// Wiring: SCK = GPIO6, MOSI = GPIO7, CS = GPIO10, D/C = GPIO4, RST = GPIO5.
+// are those of the ili9341-registers and ili9341-ng crates. Then it reads the display
+// ID and power mode back; that needs the ili9341-sim chip (diagram-chip.json), as
+// Wokwi's built-in ILI9341 returns zeros for every read.
+// Wiring: SCK = GPIO6, MOSI = GPIO7, MISO = GPIO2, CS = GPIO10, D/C = GPIO4, RST = GPIO5.
 
 #include <SPI.h>
 
 constexpr int PIN_SCK = 6;
 constexpr int PIN_MOSI = 7;
+constexpr int PIN_MISO = 2;
 constexpr int PIN_CS = 10;
 constexpr int PIN_DC = 4;
 constexpr int PIN_RST = 5;
@@ -18,6 +21,8 @@ constexpr uint16_t HEIGHT = 240;
 
 // Command codes.
 constexpr uint8_t SWRESET = 0x01;
+constexpr uint8_t RDDIDIF = 0x04;
+constexpr uint8_t RDDPM = 0x0A;
 constexpr uint8_t SLPOUT = 0x11;
 constexpr uint8_t DISPON = 0x29;
 constexpr uint8_t CASET = 0x2A;
@@ -80,6 +85,8 @@ const Glyph GLYPHS[] = {
 };
 
 const SPISettings SPI_SETTINGS(40000000, MSBFIRST, SPI_MODE0);
+// Reads need an SPI clock of at most 6.6 MHz.
+const SPISettings READ_SETTINGS(6000000, MSBFIRST, SPI_MODE0);
 
 // Sends a command with D/CX low, then its parameters with D/CX high.
 void command(uint8_t code, const uint8_t *params = nullptr, size_t len = 0) {
@@ -90,6 +97,20 @@ void command(uint8_t code, const uint8_t *params = nullptr, size_t len = 0) {
   digitalWrite(PIN_DC, HIGH);
   if (len > 0) {
     SPI.writeBytes(params, len);
+  }
+  digitalWrite(PIN_CS, HIGH);
+  SPI.endTransaction();
+}
+
+// Sends a read command and reads its response in the same transaction, with D/CX low
+// throughout, as the ili9341-ng driver does.
+void readCommand(uint8_t code, uint8_t *buffer, size_t len) {
+  SPI.beginTransaction(READ_SETTINGS);
+  digitalWrite(PIN_CS, LOW);
+  digitalWrite(PIN_DC, LOW);
+  SPI.transfer(code);
+  for (size_t i = 0; i < len; i++) {
+    buffer[i] = SPI.transfer(0);
   }
   digitalWrite(PIN_CS, HIGH);
   SPI.endTransaction();
@@ -177,7 +198,7 @@ void setup() {
   pinMode(PIN_DC, OUTPUT);
   pinMode(PIN_RST, OUTPUT);
   digitalWrite(PIN_CS, HIGH);
-  SPI.begin(PIN_SCK, -1, PIN_MOSI, -1);
+  SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI, -1);
 
   // Hardware reset: RESX low for at least 10 us, then 120 ms until commands are accepted.
   digitalWrite(PIN_RST, LOW);
@@ -209,6 +230,15 @@ void setup() {
   drawText(110, 135, "ili9341-ng", WHITE);
 
   Serial.printf("ILI9341 ok %ux%u\n", WIDTH, HEIGHT);
+
+  // RDDIDIF: one dummy clock precedes the 24 data bits.
+  uint8_t id[4];
+  readCommand(RDDIDIF, id, sizeof(id));
+  const uint32_t bits = (uint32_t(id[0]) << 24 | uint32_t(id[1]) << 16 | uint32_t(id[2]) << 8 | id[3]) << 1;
+  uint8_t powerMode;
+  readCommand(RDDPM, &powerMode, 1);
+  Serial.printf("readback id=%02X %02X %02X power_mode=%02X\n", uint8_t(bits >> 24), uint8_t(bits >> 16),
+                uint8_t(bits >> 8), powerMode);
 }
 
 void loop() {

@@ -31,7 +31,7 @@ carries the chip as `chip.zip`, for use with a `github:` dependency in `diagram.
 
 For the [Wokwi](https://wokwi.com) web editor, which no longer compiles Rust,
 [`examples/arduino-esp32c3`](examples/arduino-esp32c3/README.md) draws the same picture
-from an Arduino sketch with raw ILI9341 commands.
+from an Arduino sketch with raw ILI9341 commands, on the built-in part or on the chip.
 
 ## Development
 
