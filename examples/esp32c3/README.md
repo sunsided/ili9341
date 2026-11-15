@@ -14,18 +14,37 @@ blocking `ili9341-ng` driver and `embedded-graphics`.
 
 ## Run in Wokwi
 
-Uses Wokwi's built-in `wokwi-ili9341` part. Requires
-`rustup target add riscv32imc-unknown-none-elf`,
+`diagram.json` uses Wokwi's built-in `wokwi-ili9341` part; `diagram-chip.json` swaps in
+the [`ili9341-sim` chip](../../sim/wokwi-chip/README.md) and wires MISO to GPIO2.
+Requires `rustup target add riscv32imc-unknown-none-elf wasm32-unknown-unknown`,
 [`wokwi-cli`](https://docs.wokwi.com/wokwi-ci/cli-installation) and `WOKWI_CLI_TOKEN`.
 
 ```sh
+../../sim/wokwi-chip/build.sh
 cargo build --release
 wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000 \
   --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot.png
+wokwi-cli . --diagram-file diagram-chip.json --scenario scenarios/draw.yaml --timeout 10000 \
+  --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot-chip.png
 ```
 
-The scenario only checks the serial output; look at `screenshot.png` to see what the
-display shows. CI uploads it as the `wokwi-screenshot` artifact.
+The scenario only checks the serial output; look at the screenshots to see what the
+display shows. Both parts show the same picture. CI uploads them as the
+`wokwi-screenshot` artifact.
+
+## Read back (`src/bin/readback.rs`)
+
+Writes 18-bit pixels, reads them back with the display ID and power mode, and prints
+`readback ok` if the pixels match. It needs MISO, so it runs against the chip; Wokwi's
+built-in part returns zeros for every read. The SPI clock is 6 MHz, the datasheet's read
+limit.
+
+```sh
+wokwi-cli . --diagram-file diagram-chip.json --scenario scenarios/readback.yaml \
+  --elf target/riscv32imc-unknown-none-elf/release/readback --timeout 10000
+```
+
+On hardware, wire `SDO` to GPIO2 and run `cargo run --release --bin readback`.
 
 ## Run on hardware
 

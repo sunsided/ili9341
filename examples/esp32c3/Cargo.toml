@@ -5,6 +5,7 @@ version = "0.1.0"
 license = "EUPL-1.2 OR MIT OR Apache-2.0"
 edition = "2024"
 publish = false
+default-run = "ili9341-example-esp32c3"
 
 [dependencies]
 embedded-graphics = "0.8.2"

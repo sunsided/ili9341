@@ -111,11 +111,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install target
-        run: rustup target add riscv32imc-unknown-none-elf
-      - name: Lint firmware
-        working-directory: examples/esp32c3
-        run: cargo fmt --check && cargo clippy --release -- -D warnings
+      - name: Install targets
+        run: rustup target add wasm32-unknown-unknown riscv32imc-unknown-none-elf
+      - name: Lint chip and firmware
+        run: |
+          (cd sim/wokwi-chip && cargo fmt --check && cargo clippy --release -- -D warnings)
+          (cd examples/esp32c3 && cargo fmt --check && cargo clippy --release -- -D warnings)
+      - name: Build chip
+        run: sim/wokwi-chip/build.sh
       - name: Build firmware
         working-directory: examples/esp32c3
         run: cargo build --release
@@ -124,7 +127,7 @@ jobs:
         env:
           WOKWI_CLI_TOKEN: ${{ secrets.WOKWI_CLI_TOKEN }}
         run: echo "present=${WOKWI_CLI_TOKEN:+true}" >> "$GITHUB_OUTPUT"
-      - name: Run scenario
+      - name: Run scenario (built-in ILI9341)
         if: steps.token.outputs.present == 'true'
         uses: wokwi/wokwi-ci-action@09e807a07e05b6f2498e43e3fb7ffcf38c277af7 # v1.3.0
         with:
@@ -135,12 +138,32 @@ jobs:
           # The serial line only proves the firmware ran; the screenshot shows what
           # the display received.
           args: --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file ${{ github.workspace }}/screenshot.png
-      - name: Upload screenshot
+      - name: Run scenario (ili9341-sim chip)
+        if: steps.token.outputs.present == 'true'
+        uses: wokwi/wokwi-ci-action@09e807a07e05b6f2498e43e3fb7ffcf38c277af7 # v1.3.0
+        with:
+          token: ${{ secrets.WOKWI_CLI_TOKEN }}
+          path: examples/esp32c3
+          timeout: 10000
+          scenario: scenarios/draw.yaml
+          diagram_file: diagram-chip.json
+          args: --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file ${{ github.workspace }}/screenshot-chip.png
+      - name: Run read-back scenario (ili9341-sim chip)
+        if: steps.token.outputs.present == 'true'
+        uses: wokwi/wokwi-ci-action@09e807a07e05b6f2498e43e3fb7ffcf38c277af7 # v1.3.0
+        with:
+          token: ${{ secrets.WOKWI_CLI_TOKEN }}
+          path: examples/esp32c3
+          timeout: 10000
+          scenario: scenarios/readback.yaml
+          diagram_file: diagram-chip.json
+          elf: target/riscv32imc-unknown-none-elf/release/readback
+      - name: Upload screenshots
         if: always() && steps.token.outputs.present == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wokwi-screenshot
-          path: screenshot.png
+          path: screenshot*.png
           if-no-files-found: warn
 
   coverage:

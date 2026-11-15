@@ -2,3 +2,9 @@
 version = 1
 elf = "target/riscv32imc-unknown-none-elf/release/ili9341-example-esp32c3"
 firmware = "target/riscv32imc-unknown-none-elf/release/ili9341-example-esp32c3"
+
+# Used by diagram-chip.json, which swaps Wokwi's built-in ILI9341 for the
+# ili9341-sim chip; build it with ../../sim/wokwi-chip/build.sh.
+[[chip]]
+name = "ili9341"
+binary = "../../sim/wokwi-chip/ili9341.chip.wasm"

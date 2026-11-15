@@ -1,0 +1,6 @@
+name: Read back status and pixels (ili9341-sim chip)
+version: 1
+author: Markus Mayer
+
+steps:
+  - wait-serial: 'readback ok'

@@ -19,8 +19,15 @@
 
 The behavioral model in `ili9341-sim` decodes the command stream of the SPI and parallel
 interfaces into a frame memory, and enforces the datasheet's reset and sleep timing.
-Host tests run the driver against it. The example firmware in `examples/esp32c3` runs
-against Wokwi's built-in ILI9341 part using `wokwi-cli`.
+It is used both in host tests of the driver and as a [Wokwi](https://wokwi.com) custom
+chip ([`sim/wokwi-chip`](sim/wokwi-chip/README.md)). Unlike Wokwi's built-in ILI9341
+part, the chip answers SPI reads and supports the parallel buses, 18-bit color,
+scrolling and partial mode.
+
+The example firmware in [`examples/esp32c3`](examples/esp32c3/README.md) runs against
+both, using `wokwi-cli`: the drawing scenario on the built-in part and on the chip, and a
+read-back scenario on the chip. Every [GitHub Release](https://github.com/sunsided/ili9341/releases)
+carries the chip as `chip.zip`, for use with a `github:` dependency in `diagram.json`.
 
 For the [Wokwi](https://wokwi.com) web editor, which no longer compiles Rust,
 [`examples/arduino-esp32c3`](examples/arduino-esp32c3/README.md) draws the same picture

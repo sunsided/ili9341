@@ -3,6 +3,7 @@
 version: '3'
 
 vars:
+  CHIP_DIR: sim/wokwi-chip
   FIRMWARE_DIR: examples/esp32c3
 
 tasks:
@@ -28,11 +29,12 @@ tasks:
       - cargo test --workspace --no-default-features {{.CLI_ARGS}}
 
   fmt:
-    desc: Format the workspace and the firmware
+    desc: Format the workspace, the Wokwi chip and the firmware
     aliases: [format]
     preconditions: *cargo
     cmds:
       - cargo fmt --all
+      - cd {{.CHIP_DIR}} && cargo fmt
       - cd {{.FIRMWARE_DIR}} && cargo fmt
 
   lint:
@@ -94,8 +96,23 @@ tasks:
     cmds:
       - cargo llvm-cov --workspace --all-features --summary-only
 
+  chip:
+    desc: Build the Wokwi chip (ili9341.chip.wasm)
+    preconditions:
+      - sh: rustup target list --installed | grep -q wasm32-unknown-unknown
+        msg: "wasm target missing — rustup target add wasm32-unknown-unknown"
+    sources:
+      - '{{.CHIP_DIR}}/src/**/*.rs'
+      - '{{.CHIP_DIR}}/Cargo.toml'
+      - ili9341-sim/src/**/*.rs
+      - ili9341-registers/src/**/*.rs
+    generates:
+      - '{{.CHIP_DIR}}/ili9341.chip.wasm'
+    cmds:
+      - '{{.CHIP_DIR}}/build.sh'
+
   firmware:
-    desc: Build the ESP32-C3 example firmware
+    desc: Build the ESP32-C3 example firmware (both binaries)
     preconditions:
       - sh: rustup target list --installed | grep -q riscv32imc-unknown-none-elf
         msg: "RISC-V target missing — rustup target add riscv32imc-unknown-none-elf"
@@ -103,8 +120,8 @@ tasks:
       - cd {{.FIRMWARE_DIR}} && cargo build --release
 
   sim:
-    desc: Run the Wokwi drawing scenario against the firmware
-    deps: [firmware]
+    desc: Run the drawing scenario on the built-in ILI9341 and the chip, and the read-back scenario on the chip
+    deps: [chip, firmware]
     preconditions:
       - sh: command -v wokwi-cli
         msg: "wokwi-cli not found — see https://docs.wokwi.com/wokwi-ci/cli-installation"
@@ -112,6 +129,8 @@ tasks:
         msg: "WOKWI_CLI_TOKEN not set — create one at https://wokwi.com/dashboard/ci"
     cmds:
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot.png
+      - cd {{.FIRMWARE_DIR}} && wokwi-cli . --diagram-file diagram-chip.json --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot-chip.png
+      - cd {{.FIRMWARE_DIR}} && wokwi-cli . --diagram-file diagram-chip.json --elf target/riscv32imc-unknown-none-elf/release/readback --scenario scenarios/readback.yaml --timeout 10000
 
   release:dry:
     desc: Preview a release without changing anything (LEVEL=patch|minor|major)
@@ -128,8 +147,9 @@ tasks:
       - cargo release {{.LEVEL}} --workspace
 
   clean:
-    desc: Remove build output of the workspace and the firmware
+    desc: Remove build output of the workspace, the chip and the firmware
     preconditions: *cargo
     cmds:
       - cargo clean
+      - cd {{.CHIP_DIR}} && cargo clean && rm -f ili9341.chip.wasm
       - cd {{.FIRMWARE_DIR}} && cargo clean
