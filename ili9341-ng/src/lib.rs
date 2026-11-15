@@ -16,14 +16,28 @@
 //!   [`OutputBus`]. [`GpioBus`] implements it on individual pins; implement [`OutputBus`]
 //!   yourself for a faster port write.
 //!
-//! Reading works over SPI only ([`ReadInterface`]), and needs `SDO` connected, which
-//! many modules leave open.
+//! Reading ([`ReadInterface`]) works over SPI with `SDO` connected, which many modules
+//! leave open, and over the parallel bus with `RDX` connected and a [`ReadBus`] that
+//! switches the data lines to inputs.
 //!
 //! ## Pixels
 //!
 //! The controller runs in 16-bit (RGB565) or 18-bit (RGB666) color, see [`ColorDepth`].
 //! Either way, the driver takes RGB565 pixels as `u16` and RGB666 pixels as `[r, g, b]`
 //! with 6-bit components, and converts them to the configured depth.
+//!
+//! ## Bulk transfers
+//!
+//! [`Ili9341::draw_raw`] writes pixel data from a byte slice in the controller's format,
+//! and [`SpiInterface`] passes it to the SPI device in one write: with a DMA-capable
+//! device, a framebuffer can go out without a copy. Fills send one pixel repeatedly from a
+//! prepared buffer.
+//!
+//! ## Tearing
+//!
+//! The controller refreshes the panel at about 70 Hz from the frame memory. To update
+//! without tearing, enable its `TE` output with [`Ili9341::set_tearing_effect`], wait for
+//! the pulse on a GPIO, then write. See [`TearingEffect`].
 //!
 //! ## Scrolling and partial mode
 //!
@@ -57,7 +71,9 @@ mod graphics;
 pub use graphics::Rgb666Target;
 pub use ili9341_registers as registers;
 pub use ili9341_registers::{Command, HEIGHT, WIDTH};
-pub use interface::{GpioBus, InterfaceError, OutputBus, ParallelInterface, SpiInterface, Word};
+pub use interface::{
+    GpioBus, InterfaceError, OutputBus, ParallelInterface, ReadBus, SpiInterface, Word,
+};
 
 /// How long `RESX` is held low during [`reset`], in microseconds.
 ///
@@ -81,7 +97,10 @@ pub const SLEEP_OUT_DELAY_MS: u32 = 120;
 pub const SLEEP_IN_DELAY_MS: u32 = 120;
 
 /// Power, VCOM, frame rate and gamma settings sent by [`Ili9341::init`] after the
-/// software reset.
+/// software reset, as `(command, parameters)`.
+///
+/// For a panel that needs other values, pass your own sequence to
+/// [`Ili9341::init_with`].
 ///
 /// The values come from the `begin()` sequence of [Adafruit_ILI9341], present since its
 /// oldest file history ([`a82528f`], 2014-01-02) without a note on their origin.
@@ -93,7 +112,7 @@ pub const SLEEP_IN_DELAY_MS: u32 = 120;
 /// [`a82528f`]: https://github.com/adafruit/Adafruit_ILI9341/blob/a82528fb6a5c6ba39b3bc411123df68ab5cdce0d/Adafruit_ILI9341.cpp
 /// [TFT_eSPI]: https://github.com/Bodmer/TFT_eSPI/blob/master/TFT_Drivers/ILI9341_Init.h
 /// [forum]: https://forum.arduino.cc/t/bodmer-ili9341-master-library-vs-datasheet/518777
-const PANEL_INIT: &[(u8, &[u8])] = &[
+pub const PANEL_INIT: &[(u8, &[u8])] = &[
     // Undocumented: not in the datasheet, effect unknown. An Adafruit forum thread
     // reportedly attributes it to Ilitek and the panel maker (unverified, page not
     // readable): https://forums.adafruit.com/viewtopic.php?f=47&t=63229
@@ -147,6 +166,14 @@ pub enum ColorDepth {
 }
 
 impl ColorDepth {
+    /// The bytes per pixel of the pixel data: 2 or 3.
+    pub const fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Bits16 => 2,
+            Self::Bits18 => 3,
+        }
+    }
+
     /// The `COLMOD` parameter.
     pub const fn pixel_format(self) -> registers::PixelFormat {
         let bpp = match self {
@@ -285,6 +312,20 @@ pub enum ColorOrder {
     /// Blue-green-red. Most ILI9341 modules use this order.
     #[default]
     Bgr,
+}
+
+/// What the `TE` output signals (`TEON`).
+///
+/// `TE` goes high while the controller does not read the frame memory for the panel;
+/// writing the frame memory then avoids tearing.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum TearingEffect {
+    /// Vertical blanking only: one pulse per frame.
+    #[default]
+    VBlank,
+    /// Vertical and horizontal blanking: one pulse per frame and per line.
+    VAndHBlank,
 }
 
 interface!(

@@ -81,11 +81,13 @@ macro_rules! driver {
                 self.color_depth
             }
 
-            /// Checks that `width × height` pixels fit into a buffer of `len` pixels.
-            fn check_buffer<E>(width: u16, height: u16, len: usize) -> Result<(), $crate::Error<E>> {
+            /// Checks that `width × height` pixels of `unit` elements each fill a buffer
+            /// of `len` elements.
+            fn check_buffer<E>(width: u16, height: u16, unit: usize, len: usize) -> Result<(), $crate::Error<E>> {
                 // u32: the product overflows a 16-bit usize for a full screen.
+                let expected = u32::from(width) * u32::from(height) * unit as u32;
                 match u32::try_from(len) {
-                    Ok(len) if len == u32::from(width) * u32::from(height) => Ok(()),
+                    Ok(len) if len == expected => Ok(()),
                     _ => Err($crate::Error::BufferLength),
                 }
             }
@@ -121,11 +123,25 @@ macro_rules! driver {
             DI: $interface,
         {
             /// Initializes the controller: software reset, the Adafruit power, VCOM, frame
-            /// rate and gamma settings, the stored color depth, orientation and color
-            /// order, sleep out and display on.
+            /// rate and gamma settings ([`PANEL_INIT`](crate::PANEL_INIT)), the stored
+            /// color depth, orientation and color order, sleep out and display on.
             ///
             /// Takes about 240 ms. The frame memory content is undefined afterwards.
             pub $($asy)* fn init<D>(&mut self, delay: &mut D) -> Result<(), $crate::Error<DI::Error>>
+            where
+                D: $delay,
+            {
+                self.init_with(delay, $crate::PANEL_INIT) $($aw)*
+            }
+
+            /// Initializes the controller like [`init`](Self::init), with your own panel
+            /// settings: `panel` is a list of `(command, parameters)`, sent after the
+            /// software reset in place of [`PANEL_INIT`](crate::PANEL_INIT).
+            pub $($asy)* fn init_with<D>(
+                &mut self,
+                delay: &mut D,
+                panel: &[(u8, &[u8])],
+            ) -> Result<(), $crate::Error<DI::Error>>
             where
                 D: $delay,
             {
@@ -134,7 +150,7 @@ macro_rules! driver {
                 self.send_command(Command::SWRESET, &[]) $($aw)* ?;
                 self.scroll_area = (0, $crate::HEIGHT);
                 delay.delay_ms($crate::RESET_DELAY_MS) $($aw)*;
-                for &(command, parameters) in $crate::PANEL_INIT {
+                for &(command, parameters) in panel {
                     self.interface
                         .send_command(command, parameters)
                         $($aw)*
@@ -198,6 +214,37 @@ macro_rules! driver {
             pub $($asy)* fn set_display_on(&mut self, on: bool) -> Result<(), $crate::Error<DI::Error>> {
                 let command = if on { $crate::Command::DISPON } else { $crate::Command::DISPOFF };
                 self.send_command(command, &[]) $($aw)*
+            }
+
+            /// Turns idle mode on or off. In idle mode, the panel shows 8 colors: the most
+            /// significant bit of each component.
+            pub $($asy)* fn set_idle_mode(&mut self, idle: bool) -> Result<(), $crate::Error<DI::Error>> {
+                let command = if idle { $crate::Command::IDMON } else { $crate::Command::IDMOFF };
+                self.send_command(command, &[]) $($aw)*
+            }
+
+            /// Turns the tearing effect output `TE` on with `Some` mode, or off with `None`.
+            pub $($asy)* fn set_tearing_effect(
+                &mut self,
+                mode: Option<$crate::TearingEffect>,
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                match mode {
+                    None => self.send_command($crate::Command::TEOFF, &[]) $($aw)*,
+                    Some(mode) => {
+                        let both = u8::from(mode == $crate::TearingEffect::VAndHBlank);
+                        self.send_command($crate::Command::TEON, &[both]) $($aw)*
+                    }
+                }
+            }
+
+            /// Sets the panel line (`0..320`) at which `TE` goes high in
+            /// [`VBlank`](crate::TearingEffect::VBlank) mode; `0` is the start of the
+            /// vertical blanking.
+            pub $($asy)* fn set_tear_scanline(&mut self, line: u16) -> Result<(), $crate::Error<DI::Error>> {
+                if line >= $crate::HEIGHT {
+                    return Err($crate::Error::OutOfBounds);
+                }
+                self.send_command($crate::Command::SET_TEAR_SCANLINE, &line.to_be_bytes()) $($aw)*
             }
 
             /// Enters sleep mode. The frame memory is kept.
@@ -294,6 +341,30 @@ macro_rules! driver {
                 self.write_pixels(x, y, width, height, pixels) $($aw)*
             }
 
+            /// Writes pixel data from a slice into an area, row by row, in the current
+            /// color depth: two bytes per pixel (RGB565, big-endian) in 16-bit color, three
+            /// (`[r, g, b]`, components in the upper six bits) in 18-bit color.
+            ///
+            /// `data` must hold exactly `width × height` pixels. Over SPI, it goes to the
+            /// device in one write, which a DMA-capable device can send without copying; use
+            /// it to flush a framebuffer, such as the big-endian `Framebuffer` of
+            /// `embedded-graphics`.
+            pub $($asy)* fn draw_raw(
+                &mut self,
+                x: u16,
+                y: u16,
+                width: u16,
+                height: u16,
+                data: &[u8],
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                Self::check_buffer(width, height, self.color_depth.bytes_per_pixel(), data.len())?;
+                if !self.set_window(x, y, width, height) $($aw)* ? {
+                    return Ok(());
+                }
+                self.send_command($crate::Command::RAMWR, &[]) $($aw)* ?;
+                self.interface.send_pixel_slice(data) $($aw)* .map_err($crate::Error::Interface)
+            }
+
             /// Fills an area with one color.
             pub $($asy)* fn fill_rect(
                 &mut self,
@@ -316,9 +387,16 @@ macro_rules! driver {
                 height: u16,
                 color: P,
             ) -> Result<(), $crate::Error<DI::Error>> {
-                // Per row: `width * height` overflows a 16-bit `usize` for a full screen.
-                let pixels = (0..height).flat_map(|_| core::iter::repeat_n(color, width.into()));
-                self.write_pixels(x, y, width, height, pixels) $($aw)*
+                if !self.set_window(x, y, width, height) $($aw)* ? {
+                    return Ok(());
+                }
+                self.send_command($crate::Command::RAMWR, &[]) $($aw)* ?;
+                let (bytes, len) = color.encode(self.color_depth);
+                let count = u32::from(width) * u32::from(height);
+                self.interface
+                    .send_pixel_repeat(&bytes[..len], count)
+                    $($aw)*
+                    .map_err($crate::Error::Interface)
             }
 
             /// Fills the whole screen with one color.
@@ -404,11 +482,10 @@ macro_rules! driver {
             $($asy)* fn read(
                 &mut self,
                 command: $crate::Command,
-                dummy_byte: bool,
                 buffer: &mut [u8],
             ) -> Result<(), $crate::Error<DI::Error>> {
                 self.interface
-                    .read(command.code(), dummy_byte, buffer)
+                    .read(command.code(), buffer)
                     $($aw)*
                     .map_err($crate::Error::Interface)
             }
@@ -416,7 +493,7 @@ macro_rules! driver {
             /// Reads one byte from an 8-bit read command.
             $($asy)* fn read_u8(&mut self, command: $crate::Command) -> Result<u8, $crate::Error<DI::Error>> {
                 let mut buffer = [0];
-                self.read(command, false, &mut buffer) $($aw)* ?;
+                self.read(command, &mut buffer) $($aw)* ?;
                 Ok(buffer[0])
             }
 
@@ -446,11 +523,9 @@ macro_rules! driver {
             /// Reads the display identification (`RDDIDIF`): manufacturer ID, module or
             /// driver version, and module or driver ID. The values depend on the module.
             pub $($asy)* fn read_display_id(&mut self) -> Result<[u8; 3], $crate::Error<DI::Error>> {
-                // One dummy clock precedes the 24 data bits.
-                let mut buffer = [0; 4];
-                self.read($crate::Command::RDDIDIF, false, &mut buffer) $($aw)* ?;
-                let [a, b, c, _] = (u32::from_be_bytes(buffer) << 1).to_be_bytes();
-                Ok([a, b, c])
+                let mut buffer = [0; 3];
+                self.read($crate::Command::RDDIDIF, &mut buffer) $($aw)* ?;
+                Ok(buffer)
             }
 
             /// Reads pixels from an area of the frame memory, row by row, as RGB666
@@ -466,13 +541,13 @@ macro_rules! driver {
                 height: u16,
                 pixels: &mut [[u8; 3]],
             ) -> Result<(), $crate::Error<DI::Error>> {
-                Self::check_buffer(width, height, pixels.len())?;
+                Self::check_buffer(width, height, 1, pixels.len())?;
                 if !self.set_window(x, y, width, height) $($aw)* ? {
                     return Ok(());
                 }
-                // One dummy byte precedes the pixels; components arrive in the upper six bits.
+                // Components arrive in the upper six bits.
                 let bytes = pixels.as_flattened_mut();
-                self.read($crate::Command::RAMRD, true, bytes) $($aw)* ?;
+                self.read($crate::Command::RAMRD, bytes) $($aw)* ?;
                 bytes.iter_mut().for_each(|byte| *byte >>= 2);
                 Ok(())
             }

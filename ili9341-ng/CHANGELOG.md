@@ -5,6 +5,30 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `draw_raw` writes pixel data from a byte slice in the current color depth.
+  `SpiInterface` hands the slice to the SPI device in one write, so a DMA-capable device
+  can send a framebuffer without a copy. The `asynch` docs show flushing an
+  `embedded-graphics` `Framebuffer` with it.
+- `Interface::send_pixel_slice` and `Interface::send_pixel_repeat`, provided methods that
+  `SpiInterface` overrides. Fills now send one prepared buffer repeatedly instead of
+  encoding every pixel.
+- Tearing effect output: `set_tearing_effect` with `TearingEffect`, and
+  `set_tear_scanline`.
+- Idle mode: `set_idle_mode`.
+- `init_with` initializes with your own panel settings; `PANEL_INIT` holds the defaults.
+- Reading over the parallel bus: `ParallelInterface::with_read` adds `RDX` as a fourth
+  type parameter (default `()`), and the new `ReadBus` trait switches the data lines to
+  inputs and samples them.
+- `ColorDepth::bytes_per_pixel`.
+
+### Changed
+
+- [**breaking**] `ReadInterface::read` drops its `dummy_byte` parameter: the interface
+  now handles the dummy cycles of each command, which differ between SPI and the
+  parallel bus. `SpiInterface` also drops the dummy bit of 24- and 32-bit reads.
+
 ## [0.2.0] - 2026-11-15
 
 [0.2.0]: https://github.com/sunsided/ili9341/releases/tag/v0.2.0

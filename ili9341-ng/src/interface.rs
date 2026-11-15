@@ -2,9 +2,11 @@
 
 use embedded_hal::digital::{OutputPin, PinState};
 
-/// How many bytes [`SpiInterface`] buffers per SPI write when streaming pixel data.
+/// How many bytes [`SpiInterface`] buffers per SPI write when streaming pixel data from an
+/// iterator or repeating one color.
 ///
-/// Each chunk is one SPI transaction; a full screen in 16-bit color takes 600.
+/// Each chunk is one SPI transaction; a full screen in 16-bit color takes 600. Slices
+/// ([`Interface::send_pixel_slice`](crate::Interface::send_pixel_slice)) go out in one.
 pub(crate) const SPI_CHUNK: usize = 256;
 
 /// An interface error.
@@ -13,7 +15,7 @@ pub(crate) const SPI_CHUNK: usize = 256;
 pub enum InterfaceError<B, P> {
     /// The SPI or parallel data bus failed.
     Bus(B),
-    /// A control pin (`D/CX`, `WRX`) failed.
+    /// A control pin (`D/CX`, `WRX`, `RDX`) failed.
     Pin(P),
 }
 
@@ -125,22 +127,66 @@ impl<P: OutputPin> OutputBus for GpioBus<P, 16> {
     }
 }
 
-/// The 8080-I parallel bus: data lines, `D/CX` and `WRX`. `CSX` must be held low and
-/// `RDX` high.
+/// The data lines of a parallel bus that can also read: the host switches them to inputs
+/// while the controller drives them.
+///
+/// Implement it on the port registers of your host; [`GpioBus`] cannot switch the
+/// direction of an [`OutputPin`].
+pub trait ReadBus: OutputBus {
+    /// Switches the data lines to inputs.
+    fn set_input(&mut self) -> Result<(), Self::Error>;
+
+    /// Switches the data lines back to outputs.
+    fn set_output(&mut self) -> Result<(), Self::Error>;
+
+    /// Samples the data lines; bit `n` comes from `Dn`.
+    ///
+    /// Called with `RDX` low. The controller needs up to 340 ns after the falling edge of
+    /// `RDX` to drive frame memory data (`tRDLFM`), and 40 ns for other reads (`tRDLID`);
+    /// wait that long here if the host is faster.
+    fn read_value(&mut self) -> Result<Self::Word, Self::Error>;
+}
+
+/// The 8080-I parallel bus: data lines, `D/CX`, `WRX` and optionally `RDX`. `CSX` must be
+/// held low, and `RDX` high when it is not connected through
+/// [`with_read`](Self::with_read).
 ///
 /// The bus width follows the [`OutputBus`]. With a 16-bit bus, commands and parameters
 /// use `D[7:0]`.
+///
+/// With `RDX` and a [`ReadBus`], it implements [`ReadInterface`](crate::ReadInterface).
+/// Every parallel read starts with a dummy word. Frame memory reads on the 16-bit bus are
+/// assumed to pack the 8-bit pixel byte stream two bytes per word, first byte on
+/// `D[15:8]`, as pixel writes do.
 #[derive(Debug)]
-pub struct ParallelInterface<BUS, DC, WR> {
+pub struct ParallelInterface<BUS, DC, WR, RD = ()> {
     bus: BUS,
     dc: DC,
     wr: WR,
+    rd: RD,
 }
 
 impl<BUS, DC, WR> ParallelInterface<BUS, DC, WR> {
-    /// Creates the interface. Performs no pin access.
+    /// Creates a write-only interface. Performs no pin access.
     pub fn new(bus: BUS, dc: DC, wr: WR) -> Self {
-        Self { bus, dc, wr }
+        Self {
+            bus,
+            dc,
+            wr,
+            rd: (),
+        }
+    }
+
+    /// Adds the `RDX` pin, for reading through a [`ReadBus`]. Performs no pin access;
+    /// `RDX` must be high until the first read.
+    pub fn with_read<RD>(self, rd: RD) -> ParallelInterface<BUS, DC, WR, RD> {
+        let Self {
+            bus,
+            dc,
+            wr,
+            rd: (),
+        } = self;
+        ParallelInterface { bus, dc, wr, rd }
     }
 
     /// Consumes the interface and returns the data bus, `D/CX` and `WRX`.
@@ -149,7 +195,14 @@ impl<BUS, DC, WR> ParallelInterface<BUS, DC, WR> {
     }
 }
 
-impl<BUS, DC, WR> ParallelInterface<BUS, DC, WR>
+impl<BUS, DC, WR, RD: OutputPin> ParallelInterface<BUS, DC, WR, RD> {
+    /// Consumes the interface and returns the data bus, `D/CX`, `WRX` and `RDX`.
+    pub fn release_with_read(self) -> (BUS, DC, WR, RD) {
+        (self.bus, self.dc, self.wr, self.rd)
+    }
+}
+
+impl<BUS, DC, WR, RD> ParallelInterface<BUS, DC, WR, RD>
 where
     BUS: OutputBus,
     DC: OutputPin,
@@ -191,6 +244,58 @@ where
     }
 }
 
+impl<BUS, DC, WR, RD> ParallelInterface<BUS, DC, WR, RD>
+where
+    BUS: ReadBus<Word: Into<u16>>,
+    DC: OutputPin,
+    WR: OutputPin<Error = DC::Error>,
+    RD: OutputPin<Error = DC::Error>,
+{
+    /// Sends a read command and reads its response into `buffer`, after the dummy word.
+    pub(crate) fn read_response(
+        &mut self,
+        command: u8,
+        buffer: &mut [u8],
+    ) -> Result<(), InterfaceError<BUS::Error, DC::Error>> {
+        self.command(command, &[])?;
+        self.bus.set_input().map_err(InterfaceError::Bus)?;
+        let read = self.read_words(command, buffer);
+        // Drives the bus again even after a failed read.
+        let restored = self.bus.set_output().map_err(InterfaceError::Bus);
+        read.and(restored)
+    }
+
+    fn read_words(
+        &mut self,
+        command: u8,
+        buffer: &mut [u8],
+    ) -> Result<(), InterfaceError<BUS::Error, DC::Error>> {
+        self.read_word()?;
+        let memory = command == crate::Command::RAMRD.code()
+            || command == crate::Command::READ_MEMORY_CONTINUE.code();
+        if memory && size_of::<BUS::Word>() == 2 {
+            for bytes in buffer.chunks_mut(2) {
+                let word = self.read_word()?.to_be_bytes();
+                bytes.copy_from_slice(&word[..bytes.len()]);
+            }
+        } else {
+            for byte in buffer {
+                // Parameters use `D[7:0]` on the 16-bit bus.
+                *byte = self.read_word()? as u8;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads one word; the controller drives the data lines while `RDX` is low.
+    fn read_word(&mut self) -> Result<u16, InterfaceError<BUS::Error, DC::Error>> {
+        self.rd.set_low().map_err(InterfaceError::Pin)?;
+        let word = self.bus.read_value().map_err(InterfaceError::Bus);
+        self.rd.set_high().map_err(InterfaceError::Pin)?;
+        Ok(word?.into())
+    }
+}
+
 /// Generates the `Interface` and `ReadInterface` traits and their implementations for
 /// [`SpiInterface`] and [`ParallelInterface`].
 ///
@@ -221,14 +326,28 @@ macro_rules! interface {
             $($asy)* fn send_pixel_data<I>(&mut self, bytes: I) -> Result<(), Self::Error>
             where
                 I: IntoIterator<Item = u8>;
+
+            /// Sends pixel data from a slice, like [`send_pixel_data`](Self::send_pixel_data).
+            ///
+            /// [`SpiInterface`](crate::SpiInterface) hands the slice to the SPI device in
+            /// one write, which a DMA-capable device can send without copying.
+            $($asy)* fn send_pixel_slice(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+                self.send_pixel_data(bytes.iter().copied()) $($aw)*
+            }
+
+            /// Sends the bytes of one pixel `count` times, like
+            /// [`send_pixel_data`](Self::send_pixel_data).
+            $($asy)* fn send_pixel_repeat(&mut self, pixel: &[u8], count: u32) -> Result<(), Self::Error> {
+                self.send_pixel_data((0..count).flat_map(|_| pixel.iter().copied())) $($aw)*
+            }
         }
 
         /// An [`Interface`] that can read from the controller.
         #[allow(async_fn_in_trait)]
         pub trait ReadInterface: Interface {
-            /// Sends a read command with `D/CX` low and reads its response into `buffer`
-            /// in the same transaction, after skipping one dummy byte if `dummy_byte`.
-            $($asy)* fn read(&mut self, command: u8, dummy_byte: bool, buffer: &mut [u8]) -> Result<(), Self::Error>;
+            /// Sends a read command with `D/CX` low and reads its response into `buffer`,
+            /// skipping the dummy cycles the interface has for `command`.
+            $($asy)* fn read(&mut self, command: u8, buffer: &mut [u8]) -> Result<(), Self::Error>;
         }
 
         impl<SPI, DC> Interface for $crate::SpiInterface<SPI, DC>
@@ -271,6 +390,34 @@ macro_rules! interface {
                 }
                 Ok(())
             }
+
+            $($asy)* fn send_pixel_slice(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+                self.dc.set_high().map_err($crate::InterfaceError::Pin)?;
+                self.spi.write(bytes) $($aw)* .map_err($crate::InterfaceError::Bus)
+            }
+
+            $($asy)* fn send_pixel_repeat(&mut self, pixel: &[u8], count: u32) -> Result<(), Self::Error> {
+                const CHUNK: usize = $crate::interface::SPI_CHUNK;
+                if pixel.is_empty() || pixel.len() > CHUNK {
+                    return self.send_pixel_data((0..count).flat_map(|_| pixel.iter().copied())) $($aw)*;
+                }
+                self.dc.set_high().map_err($crate::InterfaceError::Pin)?;
+
+                // Whole pixels per chunk, written once and sent as often as needed.
+                let per_chunk = CHUNK / pixel.len();
+                let mut buffer = [0; CHUNK];
+                buffer
+                    .chunks_exact_mut(pixel.len())
+                    .for_each(|bytes| bytes.copy_from_slice(pixel));
+                let mut remaining = count;
+                while remaining > 0 {
+                    let pixels = remaining.min(per_chunk as u32);
+                    let len = pixels as usize * pixel.len();
+                    self.spi.write(&buffer[..len]) $($aw)* .map_err($crate::InterfaceError::Bus)?;
+                    remaining -= pixels;
+                }
+                Ok(())
+            }
         }
 
         impl<SPI, DC> ReadInterface for $crate::SpiInterface<SPI, DC>
@@ -278,26 +425,44 @@ macro_rules! interface {
             SPI: $spi,
             DC: embedded_hal::digital::OutputPin,
         {
-            $($asy)* fn read(&mut self, command: u8, dummy_byte: bool, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            $($asy)* fn read(&mut self, command: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
                 use embedded_hal::spi::Operation;
+                use $crate::Command;
+
+                // Memory reads start with a dummy byte, 24- and 32-bit reads with a dummy
+                // clock; 8-bit reads have none.
+                let dummy_byte = command == Command::RAMRD.code()
+                    || command == Command::READ_MEMORY_CONTINUE.code();
+                let dummy_bit = command == Command::RDDIDIF.code() || command == Command::RDDST.code();
 
                 // D/CX cannot change within one SPI transaction; the datasheet's read
                 // timing only requires it low for the command byte.
                 self.dc.set_low().map_err($crate::InterfaceError::Pin)?;
                 let mut dummy = [0];
-                let dummy = &mut dummy[..usize::from(dummy_byte)];
+                let mut last = [0];
                 self.spi
                     .transaction(&mut [
                         Operation::Write(&[command]),
-                        Operation::Read(dummy),
+                        Operation::Read(&mut dummy[..usize::from(dummy_byte)]),
                         Operation::Read(buffer),
+                        Operation::Read(&mut last[..usize::from(dummy_bit)]),
                     ])
                     $($aw)*
-                    .map_err($crate::InterfaceError::Bus)
+                    .map_err($crate::InterfaceError::Bus)?;
+                if dummy_bit {
+                    // Drops the dummy bit: shifts the response left by one bit.
+                    let mut next = last[0];
+                    for byte in buffer.iter_mut().rev() {
+                        let current = *byte;
+                        *byte = current << 1 | next >> 7;
+                        next = current;
+                    }
+                }
+                Ok(())
             }
         }
 
-        impl<BUS, DC, WR> Interface for $crate::ParallelInterface<BUS, DC, WR>
+        impl<BUS, DC, WR, RD> Interface for $crate::ParallelInterface<BUS, DC, WR, RD>
         where
             BUS: $crate::OutputBus,
             DC: embedded_hal::digital::OutputPin,
@@ -314,6 +479,18 @@ macro_rules! interface {
                 I: IntoIterator<Item = u8>,
             {
                 self.pixel_data(bytes)
+            }
+        }
+
+        impl<BUS, DC, WR, RD> ReadInterface for $crate::ParallelInterface<BUS, DC, WR, RD>
+        where
+            BUS: $crate::ReadBus<Word: Into<u16>>,
+            DC: embedded_hal::digital::OutputPin,
+            WR: embedded_hal::digital::OutputPin<Error = DC::Error>,
+            RD: embedded_hal::digital::OutputPin<Error = DC::Error>,
+        {
+            $($asy)* fn read(&mut self, command: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
+                self.read_response(command, buffer)
             }
         }
     };

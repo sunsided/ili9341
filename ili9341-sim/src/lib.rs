@@ -14,8 +14,10 @@
 //! of the datasheet: commands sent too early after a reset or sleep transition are
 //! ignored and counted, as the real chip ignores them.
 //!
-//! Over SPI, it answers the read commands `RDDIDIF`, `RDDPM`, `RDDMADCTL`, `RDDCOLMOD`,
-//! `RDDSDR` and `RAMRD` with the datasheet's dummy cycles.
+//! It answers the read commands `RDDIDIF`, `RDDPM`, `RDDMADCTL`, `RDDCOLMOD`, `RDDSDR`
+//! and `RAMRD` with the datasheet's dummy cycles: over SPI, and on the parallel bus
+//! through `RDX` ([`Line::Rd`], [`Ili9341Model::data_out`]). It tracks idle mode and the
+//! tearing effect setting, but does not drive `TE`.
 //!
 //! ## Assumptions
 //!
@@ -26,6 +28,8 @@
 //! - The 16-bit bus uses the default 18-bit transfer mode (`MDT = 00`): two bytes of the
 //!   8-bit pixel stream per word.
 //! - `MADCTL` `ML` (vertical refresh order) is ignored for scrolling and partial mode.
+//! - Frame memory reads on the 16-bit bus return the 8-bit read byte stream two bytes per
+//!   word, first byte on `D[15:8]`, like writes.
 //! - The panel shows frame memory as Wokwi's built-in ILI9341 part does: memory column 0
 //!   is the leftmost panel column, memory line 0 the bottom panel line. With the
 //!   driver's `MADCTL` values, the four orientations then look the same on both parts.
@@ -101,8 +105,10 @@ pub struct Ili9341Model {
     // Pin state, driven by `SimPin`s.
     dc: bool,
     wr: bool,
+    rd: bool,
     in_reset: bool,
     data: u16,
+    data_out: u16,
 
     // Command decoding.
     command: Option<u8>,
@@ -119,6 +125,8 @@ pub struct Ili9341Model {
     sleeping: bool,
     display_on: bool,
     inverted: bool,
+    idle: bool,
+    tearing_effect: bool,
     columns: (u16, u16),
     pages: (u16, u16),
     pointer: (u16, u16),
@@ -144,8 +152,10 @@ impl Ili9341Model {
             ignored_commands: 0,
             dc: true,
             wr: true,
+            rd: true,
             in_reset: false,
             data: 0,
+            data_out: 0,
             command: None,
             parameters: [0; MAX_PARAMETERS],
             parameter_count: 0,
@@ -158,6 +168,8 @@ impl Ili9341Model {
             sleeping: true,
             display_on: false,
             inverted: false,
+            idle: false,
+            tearing_effect: false,
             columns: (0, 0),
             pages: (0, 0),
             pointer: (0, 0),
@@ -210,6 +222,17 @@ impl Ili9341Model {
         self.inverted
     }
 
+    /// Whether idle mode (8 colors) is on.
+    pub fn is_idle(&self) -> bool {
+        self.idle
+    }
+
+    /// Whether the tearing effect output is on; [`parameters`](Self::parameters) of
+    /// `TEON` hold its mode.
+    pub fn is_tearing_effect_on(&self) -> bool {
+        self.tearing_effect
+    }
+
     /// Whether partial mode is on.
     pub fn is_partial_mode(&self) -> bool {
         self.partial_mode
@@ -247,7 +270,7 @@ impl Ili9341Model {
 
     /// The pixel the panel shows at column `x` (`0..240`) and row `y` (`0..320`, top
     /// down) as 6-bit `[r, g, b]`, after scrolling, partial mode, display on/off, sleep
-    /// and inversion. `None` outside the panel.
+    /// inversion and idle mode. `None` outside the panel.
     pub fn panel_pixel(&self, x: u16, y: u16) -> Option<[u8; 3]> {
         if x >= WIDTH || y >= HEIGHT {
             return None;
@@ -259,7 +282,10 @@ impl Ili9341Model {
         let Some(line) = self.panel_line(HEIGHT - 1 - y) else {
             return Some([0; 3]);
         };
-        let pixel = self.gram_rgb666(x, line);
+        let mut pixel = self.gram_rgb666(x, line);
+        if self.idle {
+            pixel = pixel.map(|c| if c & 0x20 != 0 { 63 } else { 0 });
+        }
         Some(if self.inverted {
             pixel.map(|c| 63 - c)
         } else {
@@ -289,6 +315,12 @@ impl Ili9341Model {
         self.read.is_some()
     }
 
+    /// The word the controller drives onto the parallel data lines while `RDX` is low:
+    /// the next word of the read in progress, taken at the falling edge of `RDX`.
+    pub fn data_out(&self) -> u16 {
+        self.data_out
+    }
+
     /// Ends an SPI read; chip select deasserting does this.
     pub fn spi_end_read(&mut self) {
         self.read = None;
@@ -315,6 +347,8 @@ impl Ili9341Model {
         self.sleeping = true;
         self.display_on = false;
         self.inverted = false;
+        self.idle = false;
+        self.tearing_effect = false;
         self.columns = (0, WIDTH - 1);
         self.pages = (0, HEIGHT - 1);
         self.partial_mode = false;
@@ -355,6 +389,8 @@ impl Ili9341Model {
     }
 
     fn receive_command(&mut self, code: u8) {
+        // A command ends a parallel read.
+        self.read = None;
         self.command = None;
         self.parameter_count = 0;
         self.pixel_byte_count = 0;
@@ -379,6 +415,13 @@ impl Ili9341Model {
             c if c == Command::DISPOFF.code() => self.display_on = false,
             c if c == Command::INVON.code() => self.inverted = true,
             c if c == Command::INVOFF.code() => self.inverted = false,
+            c if c == Command::IDMON.code() => self.idle = true,
+            c if c == Command::IDMOFF.code() => self.idle = false,
+            c if c == Command::TEOFF.code() => self.tearing_effect = false,
+            c if c == Command::TEON.code() => {
+                self.tearing_effect = true;
+                self.command = Some(code);
+            }
             c if c == Command::PTLON.code() => (self.partial_mode, self.scrolling) = (true, false),
             c if c == Command::NORON.code() => (self.partial_mode, self.scrolling) = (false, false),
             c if c == Command::RAMWR.code() => {
@@ -393,16 +436,18 @@ impl Ili9341Model {
                     pos: 3,
                 });
             }
-            c if c == Command::RDDIDIF.code() => {
+            c if c == Command::RDDIDIF.code() && self.mode == InterfaceMode::Spi => {
                 // One dummy clock, then 24 bits.
                 let [a, b, c] = MODEL_DISPLAY_ID;
                 let bits = u32::from_be_bytes([0, a, b, c]) << 7;
                 let [d0, d1, d2, d3] = bits.to_be_bytes();
                 self.respond(&[d0, d1, d2, d3]);
             }
+            c if c == Command::RDDIDIF.code() => self.respond(&MODEL_DISPLAY_ID),
             c if c == Command::RDDPM.code() => {
                 let mode = PowerMode::new()
                     .with_booster_on(!self.sleeping)
+                    .with_idle_mode(self.idle)
                     .with_partial_mode(self.partial_mode)
                     .with_sleep_out(!self.sleeping)
                     .with_normal_mode(!self.partial_mode)
@@ -418,16 +463,35 @@ impl Ili9341Model {
         }
     }
 
-    /// Starts sending a fixed response on the next SPI transfers.
+    /// Starts sending a fixed response on the next reads. On the parallel bus, a dummy
+    /// word precedes it.
     fn respond(&mut self, response: &[u8]) {
+        let dummy = usize::from(self.mode != InterfaceMode::Spi);
         let mut data = [0; 5];
-        data[..response.len()].copy_from_slice(response);
-        let len = response.len() as u8;
+        data[dummy..dummy + response.len()].copy_from_slice(response);
+        let len = (dummy + response.len()) as u8;
         self.read = Some(Read::Bytes { data, len, pos: 0 });
     }
 
     /// The next byte of the SPI read in progress, or `0` without one.
     pub fn spi_read_byte(&mut self) -> u8 {
+        self.read_byte()
+    }
+
+    /// Takes the next word of a parallel read: `RDX` falling.
+    fn parallel_read(&mut self) {
+        let pixel_word = self.mode == InterfaceMode::Parallel16
+            && matches!(self.read, Some(Read::Memory { dummy: false, .. }));
+        let first = self.read_byte();
+        self.data_out = if pixel_word {
+            u16::from_be_bytes([first, self.read_byte()])
+        } else {
+            first.into()
+        };
+    }
+
+    /// The next byte of the read in progress, or `0` without one.
+    fn read_byte(&mut self) -> u8 {
         match self.read {
             Some(Read::Bytes { data, len, pos }) if pos < len => {
                 self.read = Some(Read::Bytes {

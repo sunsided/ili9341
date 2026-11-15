@@ -12,6 +12,9 @@ pub enum Line {
     Dc,
     /// `WRX`: the parallel bus latches the data lines on its rising edge.
     Wr,
+    /// `RDX`: on the parallel bus, the controller drives the next word of a read onto
+    /// the data lines when it falls; see [`Ili9341Model::data_out`].
+    Rd,
     /// `RESX`: active-low hardware reset.
     Reset,
     /// `D0`–`D15`: a parallel data line.
@@ -54,6 +57,13 @@ impl<'a> SimPin<'a> {
                 if rising && parallel {
                     let (data, dc) = (model.data, model.dc);
                     model.receive(data, dc);
+                }
+            }
+            Line::Rd => {
+                let falling = !high && model.rd;
+                model.rd = high;
+                if falling && model.mode != crate::InterfaceMode::Spi && !model.in_reset {
+                    model.parallel_read();
                 }
             }
             Line::Reset => model.set_reset_line(high),

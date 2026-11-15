@@ -4,8 +4,8 @@ use core::cell::RefCell;
 use fake_bus::FakeDelay;
 use ili9341_ng::{ColorDepth, rgb565_to_rgb666, rgb666_to_rgb565};
 use ili9341_ng::{
-    ColorOrder, Command, Error, GpioBus, HEIGHT, Ili9341, Interface, Orientation,
-    ParallelInterface, SpiInterface, WIDTH,
+    ColorOrder, Command, Error, GpioBus, HEIGHT, Ili9341, Interface, Orientation, OutputBus,
+    ParallelInterface, ReadBus, ReadInterface, SpiInterface, TearingEffect, WIDTH,
 };
 use ili9341_sim::{FakeSpi, Ili9341Model, InterfaceMode, Line, MODEL_DISPLAY_ID, SimPin};
 
@@ -474,16 +474,17 @@ fn async_reads() {
     let (id, pixels) = block_on(async {
         display.init(&mut delay).await.unwrap();
         display.fill_rect(0, 0, 2, 1, 0x07E0).await.unwrap();
+        display.draw_raw(2, 0, 1, 1, &[0xF8, 0x00]).await.unwrap();
         let id = display.read_display_id().await.unwrap();
-        let mut pixels = [[0; 3]; 2];
+        let mut pixels = [[0; 3]; 3];
         display
-            .read_pixels_rgb666(0, 0, 2, 1, &mut pixels)
+            .read_pixels_rgb666(0, 0, 3, 1, &mut pixels)
             .await
             .unwrap();
         (id, pixels)
     });
     assert_eq!(id, MODEL_DISPLAY_ID);
-    assert_eq!(pixels, [[0, 63, 0]; 2]);
+    assert_eq!(pixels, [[0, 63, 0], [0, 63, 0], [63, 0, 0]]);
 }
 
 #[cfg(feature = "embedded-graphics")]
@@ -512,4 +513,210 @@ fn embedded_graphics_rgb666() {
     assert_eq!(m.gram_rgb666(1, 319), [1, 2, 3]);
     assert_eq!(m.gram_rgb666(2, 319), [0, 0, 0]);
     assert_eq!(m.gram_rgb666(6, 5), [63, 31, 7]);
+}
+
+#[test]
+fn draw_raw_writes_slices_in_either_depth() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display.set_orientation(Orientation::Landscape).unwrap();
+
+    display
+        .draw_raw(4, 5, 2, 1, &[0xF8, 0x00, 0x00, 0x1F])
+        .unwrap();
+    assert_eq!(
+        display.draw_raw(0, 0, 2, 1, &[0; 3]),
+        Err(Error::BufferLength)
+    );
+    // An empty area needs an empty slice, and sends nothing.
+    assert_eq!(display.draw_raw(0, 0, 0, 3, &[]), Ok(()));
+
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    display
+        .draw_raw(4, 6, 1, 1, &[63 << 2, 1 << 2, 2 << 2])
+        .unwrap();
+    assert_eq!(
+        display.draw_raw(0, 0, 1, 1, &[0; 2]),
+        Err(Error::BufferLength)
+    );
+
+    let m = model.borrow();
+    assert_eq!((m.gram(5, 4), m.gram(5, 5)), (0xF800, 0x001F));
+    assert_eq!(m.gram_rgb666(6, 4), [63, 1, 2]);
+}
+
+#[test]
+fn draw_raw_over_parallel() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Parallel16));
+    let interface = ParallelInterface::new(
+        GpioBus::new(SimPin::data16(&model)),
+        SimPin::new(&model, Line::Dc),
+        SimPin::new(&model, Line::Wr),
+    );
+    let mut display = init(&model, interface);
+    display.set_orientation(Orientation::Landscape).unwrap();
+    display.draw_raw(0, 0, 1, 1, &[0x12, 0x34]).unwrap();
+    assert_eq!(model.borrow().gram(0, 0), 0x1234);
+}
+
+#[test]
+fn fills_with_partial_last_chunk() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display.set_orientation(Orientation::Landscape).unwrap();
+    display.fill_screen(0).unwrap();
+
+    // 18-bit: 85 pixels per chunk, so 100 pixels end on a partial chunk.
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    display.fill_rect(0, 0, 100, 1, 0xFFFF).unwrap();
+    // 16-bit: 128 pixels per chunk; a full screen is 600 whole chunks.
+    display.set_color_depth(ColorDepth::Bits16).unwrap();
+    display.fill_rect(0, 1, 129, 1, 0x07E0).unwrap();
+
+    let m = model.borrow();
+    assert_eq!(m.gram_rgb666(0, 99), [63, 63, 63]);
+    assert_eq!(m.gram_rgb666(0, 100), [0, 0, 0]);
+    assert_eq!(m.gram(1, 128), 0x07E0);
+    assert_eq!(m.gram(1, 129), 0);
+}
+
+#[test]
+fn tearing_effect_and_idle_mode() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+
+    display
+        .set_tearing_effect(Some(TearingEffect::VAndHBlank))
+        .unwrap();
+    assert!(model.borrow().is_tearing_effect_on());
+    assert_eq!(model.borrow().parameters(Command::TEON.code()), [1]);
+    display
+        .set_tearing_effect(Some(TearingEffect::VBlank))
+        .unwrap();
+    assert_eq!(model.borrow().parameters(Command::TEON.code()), [0]);
+    display.set_tearing_effect(None).unwrap();
+    assert!(!model.borrow().is_tearing_effect_on());
+
+    display.set_tear_scanline(300).unwrap();
+    assert_eq!(
+        model.borrow().parameters(Command::SET_TEAR_SCANLINE.code()),
+        [1, 44]
+    );
+    assert_eq!(display.set_tear_scanline(HEIGHT), Err(Error::OutOfBounds));
+
+    // Memory column 0 is the panel's left edge; line 0 its bottom.
+    display
+        .draw_pixels_rgb666(WIDTH - 1, 0, 1, 1, [[40, 20, 63]])
+        .unwrap();
+    display.set_idle_mode(true).unwrap();
+    assert!(display.read_power_mode().unwrap().idle_mode());
+    assert_eq!(model.borrow().panel_pixel(0, HEIGHT - 1), Some([63, 0, 63]));
+    display.set_idle_mode(false).unwrap();
+    assert!(!model.borrow().is_idle());
+}
+
+#[test]
+fn init_with_custom_panel_settings() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = Ili9341::new(spi(&model));
+    let panel: &[(u8, &[u8])] = &[(Command::PWCTRL1.code(), &[0x21])];
+    display
+        .init_with(&mut FakeDelay::new(&model), panel)
+        .unwrap();
+    let m = model.borrow();
+    assert!(m.is_display_on());
+    assert_eq!(m.parameters(Command::PWCTRL1.code()), [0x21]);
+    assert_eq!(m.parameters(Command::VMCTRL1.code()), [] as [u8; 0]);
+    assert_eq!(m.ignored_commands(), 0);
+}
+
+/// A parallel bus on [`SimPin`]s whose reads sample what the model drives.
+struct SimReadBus<'a, const N: usize> {
+    pins: GpioBus<SimPin<'a>, N>,
+    model: &'a RefCell<Ili9341Model>,
+}
+
+macro_rules! sim_read_bus {
+    ($n:literal, $word:ty) => {
+        impl OutputBus for SimReadBus<'_, $n> {
+            type Word = $word;
+            type Error = core::convert::Infallible;
+
+            fn set_value(&mut self, value: $word) -> Result<(), Self::Error> {
+                self.pins.set_value(value)
+            }
+        }
+
+        impl ReadBus for SimReadBus<'_, $n> {
+            fn set_input(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn set_output(&mut self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+
+            fn read_value(&mut self) -> Result<$word, Self::Error> {
+                Ok(self.model.borrow().data_out() as $word)
+            }
+        }
+    };
+}
+
+sim_read_bus!(8, u8);
+sim_read_bus!(16, u16);
+
+/// Reads status, ID and pixels over a parallel bus.
+fn check_parallel_reads<DI>(model: &RefCell<Ili9341Model>, interface: DI)
+where
+    DI: ReadInterface,
+    DI::Error: core::fmt::Debug,
+{
+    let mut display = init(model, interface);
+    let mode = display.read_power_mode().unwrap();
+    assert!(mode.sleep_out() && mode.display_on());
+    assert_eq!(display.read_pixel_format().unwrap().into_bits(), 0x55);
+    assert_eq!(display.read_display_id().unwrap(), MODEL_DISPLAY_ID);
+
+    // Three pixels: nine bytes, so the 16-bit bus ends on a half-used word.
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    display.draw_pixels_rgb666(0, 0, 3, 1, RGB666).unwrap();
+    let mut pixels = [[0; 3]; 3];
+    display.read_pixels_rgb666(0, 0, 3, 1, &mut pixels).unwrap();
+    assert_eq!(pixels, RGB666);
+    // Writing still works after a read.
+    display.set_pixel(0, 0, 0xFFFF).unwrap();
+    assert_eq!(model.borrow().gram(WIDTH - 1, 0), 0xFFFF);
+}
+
+#[test]
+fn reads_over_parallel_8bit() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Parallel8));
+    let bus = SimReadBus {
+        pins: GpioBus::new(SimPin::data8(&model)),
+        model: &model,
+    };
+    let interface = ParallelInterface::new(
+        bus,
+        SimPin::new(&model, Line::Dc),
+        SimPin::new(&model, Line::Wr),
+    )
+    .with_read(SimPin::new(&model, Line::Rd));
+    check_parallel_reads(&model, interface);
+}
+
+#[test]
+fn reads_over_parallel_16bit() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Parallel16));
+    let bus = SimReadBus {
+        pins: GpioBus::new(SimPin::data16(&model)),
+        model: &model,
+    };
+    let interface = ParallelInterface::new(
+        bus,
+        SimPin::new(&model, Line::Dc),
+        SimPin::new(&model, Line::Wr),
+    )
+    .with_read(SimPin::new(&model, Line::Rd));
+    check_parallel_reads(&model, interface);
 }

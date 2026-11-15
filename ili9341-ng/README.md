@@ -48,16 +48,21 @@ let mut display = Ili9341::new(ParallelInterface::new(bus, dc, wr));
 - Initialization with the Adafruit_ILI9341 power and gamma settings, hardware reset, sleep and display on/off with datasheet timing
 - Four orientations, RGB/BGR color order, color inversion
 - 16-bit (RGB565) and 18-bit (RGB666) color on every interface
-- Area writes from pixel iterators, rectangle and screen fills, bounds checks
-- Vertical scrolling with fixed top and bottom areas, partial mode
-- Reading over SPI (needs `SDO` and at most 6.6 MHz): power mode, `MADCTL`, pixel
-  format, self-diagnostic, display ID, and pixels from the frame memory
+- Area writes from pixel iterators, and from byte slices in one SPI write (`draw_raw`,
+  for DMA and framebuffers); rectangle and screen fills from a prepared buffer; bounds
+  checks
+- Vertical scrolling with fixed top and bottom areas, partial mode, idle mode
+- Tearing effect output (`TE`) and its scanline
+- Reading over SPI (needs `SDO` and at most 6.6 MHz) and the parallel bus (needs `RDX`
+  and a `ReadBus`): power mode, `MADCTL`, pixel format, self-diagnostic, display ID,
+  and pixels from the frame memory
 - `embedded-graphics` `DrawTarget`s for `Rgb565` and `Rgb666`, with clipping (blocking
   driver)
+- Your own panel power and gamma settings via `init_with`
 - Raw commands via `send_command` and the [`ili9341-registers`] types
 
-Not implemented: reading over the parallel bus (it needs the `RDX` line and switching
-the data lines to inputs), idle mode, tearing effect output.
+With the async driver, draw into an `embedded-graphics` `Framebuffer` and flush it with
+`draw_raw`; the `asynch` module docs and the [async example] show how.
 
 ```rust,ignore
 // Scroll the middle of the panel; 20 fixed lines at the top and bottom.
@@ -75,6 +80,7 @@ side, whatever the orientation.
 If colors look swapped or inverted on your module, call `set_color_order(ColorOrder::Rgb)`
 or `set_inverted(true)` after `init`.
 
+[async example]: https://github.com/sunsided/ili9341/tree/main/examples/esp32c3#async-with-dma-srcbinasyncrs
 [`embedded-hal`]: https://crates.io/crates/embedded-hal
 [`embedded-hal-async`]: https://crates.io/crates/embedded-hal-async
 [`ili9341-registers`]: https://crates.io/crates/ili9341-registers
