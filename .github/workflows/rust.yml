@@ -132,6 +132,16 @@ jobs:
           path: examples/esp32c3
           timeout: 10000
           scenario: scenarios/draw.yaml
+          # The serial line only proves the firmware ran; the screenshot shows what
+          # the display received.
+          args: --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file ${{ github.workspace }}/screenshot.png
+      - name: Upload screenshot
+        if: always() && steps.token.outputs.present == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wokwi-screenshot
+          path: screenshot.png
+          if-no-files-found: warn
 
   coverage:
     name: Code coverage

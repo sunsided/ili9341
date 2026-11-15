@@ -111,7 +111,7 @@ tasks:
       - sh: test -n "$WOKWI_CLI_TOKEN"
         msg: "WOKWI_CLI_TOKEN not set — create one at https://wokwi.com/dashboard/ci"
     cmds:
-      - cd {{.FIRMWARE_DIR}} && wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000
+      - cd {{.FIRMWARE_DIR}} && wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot.png
 
   release:dry:
     desc: Preview a release without changing anything (LEVEL=patch|minor|major)

@@ -20,8 +20,12 @@ Uses Wokwi's built-in `wokwi-ili9341` part. Requires
 
 ```sh
 cargo build --release
-wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000
+wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000 \
+  --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot.png
 ```
+
+The scenario only checks the serial output; look at `screenshot.png` to see what the
+display shows. CI uploads it as the `wokwi-screenshot` artifact.
 
 ## Run on hardware
 

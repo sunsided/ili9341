@@ -4,3 +4,5 @@ author: Markus Mayer
 
 steps:
   - wait-serial: 'ILI9341 ok 320x240'
+  # Keeps the simulation running past the screenshot time.
+  - delay: 2000ms
