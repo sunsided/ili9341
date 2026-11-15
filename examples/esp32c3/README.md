@@ -46,6 +46,21 @@ wokwi-cli . --diagram-file diagram-chip.json --scenario scenarios/readback.yaml 
 
 On hardware, wire `SDO` to GPIO2 and run `cargo run --release --bin readback`.
 
+## Async with DMA (`src/bin/async.rs`)
+
+Draws the same picture with the async driver: into a 320×40 `embedded-graphics`
+framebuffer, one band of rows at a time, each flushed with `draw_raw` over the async,
+DMA-backed SPI bus. It runs the future with `embassy_futures::block_on` and a blocking
+delay; under an executor, use `embassy_time::Delay` instead.
+
+```sh
+wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000 \
+  --elf target/riscv32imc-unknown-none-elf/release/async \
+  --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot-async.png
+```
+
+On hardware, run `cargo run --release --bin async`.
+
 ## Run on hardware
 
 ```sh

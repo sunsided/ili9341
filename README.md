@@ -25,8 +25,8 @@ part, the chip answers SPI reads and supports the parallel buses, 18-bit color,
 scrolling and partial mode.
 
 The example firmware in [`examples/esp32c3`](examples/esp32c3/README.md) runs against
-both, using `wokwi-cli`: the drawing scenario on the built-in part and on the chip, and a
-read-back scenario on the chip. Every [GitHub Release](https://github.com/sunsided/ili9341/releases)
+both, using `wokwi-cli`: the drawing scenario on the built-in part and on the chip, a
+read-back scenario on the chip, and the async driver flushing a framebuffer over DMA. Every [GitHub Release](https://github.com/sunsided/ili9341/releases)
 carries the chip as `chip.zip`, for use with a `github:` dependency in `diagram.json`.
 
 For the [Wokwi](https://wokwi.com) web editor, which no longer compiles Rust,
@@ -39,8 +39,8 @@ wokwi.com, and reading its display ID back.
 ## Development
 
 The [Taskfile](Taskfile.dist.yaml) wraps the common commands: `task check` and
-`task test` run what CI runs, `task sim` builds the ESP32-C3 firmware and runs the
-drawing scenario. `task` lists everything.
+`task test` run what CI runs, `task sim` builds the ESP32-C3 firmware and runs its
+scenarios. `task` lists everything.
 
 ## Releasing
 
