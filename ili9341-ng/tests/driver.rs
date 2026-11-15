@@ -2,11 +2,12 @@
 
 use core::cell::RefCell;
 use fake_bus::FakeDelay;
+use ili9341_ng::{ColorDepth, rgb565_to_rgb666, rgb666_to_rgb565};
 use ili9341_ng::{
     ColorOrder, Command, Error, GpioBus, HEIGHT, Ili9341, Interface, Orientation,
     ParallelInterface, SpiInterface, WIDTH,
 };
-use ili9341_sim::{FakeSpi, Ili9341Model, InterfaceMode, Line, SimPin};
+use ili9341_sim::{FakeSpi, Ili9341Model, InterfaceMode, Line, MODEL_DISPLAY_ID, SimPin};
 
 type Spi<'a> = SpiInterface<FakeSpi<'a>, SimPin<'a>>;
 
@@ -275,4 +276,240 @@ fn embedded_graphics_clips() {
         assert_eq!(m.gram(100, 280 + x), expected, "x = {x}");
     }
     assert_eq!(m.gram(101, 0), Rgb565::BLUE.into_storage());
+}
+
+/// RGB666 test pixels; three, so the 16-bit bus ends on a padded half word.
+const RGB666: [[u8; 3]; 3] = [[63, 0, 1], [1, 2, 3], [32, 33, 34]];
+
+/// Draws RGB666 and RGB565 pixels in 18-bit color and checks the frame memory.
+fn check_18bit<DI: Interface>(model: &RefCell<Ili9341Model>, interface: DI)
+where
+    DI::Error: core::fmt::Debug,
+{
+    let mut display = init(model, interface);
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    assert_eq!(model.borrow().colmod(), 0x66);
+    display.set_orientation(Orientation::Landscape).unwrap();
+    display.draw_pixels_rgb666(0, 0, 3, 1, RGB666).unwrap();
+    display.draw_pixels(0, 1, 1, 1, [0xF81F]).unwrap();
+
+    let m = model.borrow();
+    for (x, pixel) in RGB666.iter().enumerate() {
+        assert_eq!(m.gram_rgb666(0, x as u16), *pixel, "x = {x}");
+    }
+    assert_eq!(m.gram_rgb666(1, 0), [63, 0, 63]);
+}
+
+#[test]
+fn rgb666_over_spi() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    check_18bit(&model, spi(&model));
+}
+
+#[test]
+fn rgb666_over_parallel_8bit() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Parallel8));
+    let interface = ParallelInterface::new(
+        GpioBus::new(SimPin::data8(&model)),
+        SimPin::new(&model, Line::Dc),
+        SimPin::new(&model, Line::Wr),
+    );
+    check_18bit(&model, interface);
+}
+
+#[test]
+fn rgb666_over_parallel_16bit() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Parallel16));
+    let interface = ParallelInterface::new(
+        GpioBus::new(SimPin::data16(&model)),
+        SimPin::new(&model, Line::Dc),
+        SimPin::new(&model, Line::Wr),
+    );
+    check_18bit(&model, interface);
+}
+
+#[test]
+fn rgb666_in_16bit_color_drops_lsbs() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display
+        .draw_pixels_rgb666(0, 0, 1, 1, [[63, 1, 1]])
+        .unwrap();
+    // Red and blue go through 5 bits and are expanded again by the controller.
+    assert_eq!(model.borrow().gram_rgb666(WIDTH - 1, 0), [63, 1, 0]);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "RGB666 components are 0..=63")]
+fn rejects_8bit_rgb666_components() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    let _ = display.draw_pixels_rgb666(0, 0, 1, 1, [[128, 128, 128]]);
+}
+
+#[test]
+fn color_conversions() {
+    assert_eq!(rgb565_to_rgb666(0xFFFF), [63, 63, 63]);
+    assert_eq!(rgb565_to_rgb666(0x0000), [0, 0, 0]);
+    assert_eq!(rgb565_to_rgb666(0x8410), [33, 32, 33]);
+    for pixel in [0x0000, 0xFFFF, 0x8410, 0x1234, 0xF81F] {
+        assert_eq!(rgb666_to_rgb565(rgb565_to_rgb666(pixel)), pixel);
+    }
+}
+
+#[test]
+fn reads_status_and_id() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+
+    let mode = display.read_power_mode().unwrap();
+    assert!(mode.booster_on() && mode.sleep_out() && mode.normal_mode() && mode.display_on());
+    assert!(!mode.partial_mode());
+    assert_eq!(
+        display.read_memory_access_control().unwrap().into_bits(),
+        0x48
+    );
+    assert_eq!(display.read_pixel_format().unwrap().into_bits(), 0x55);
+    assert_eq!(display.read_self_diagnostic().unwrap(), 0xC0);
+    assert_eq!(display.read_display_id().unwrap(), MODEL_DISPLAY_ID);
+}
+
+#[test]
+fn reads_pixels_back() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display
+        .draw_pixels(10, 20, 2, 2, [0xF800, 0x07E0, 0x001F, 0x8410])
+        .unwrap();
+
+    let mut pixels = [[0; 3]; 4];
+    display
+        .read_pixels_rgb666(10, 20, 2, 2, &mut pixels)
+        .unwrap();
+    assert_eq!(
+        pixels.map(rgb666_to_rgb565),
+        [0xF800, 0x07E0, 0x001F, 0x8410]
+    );
+
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    display.draw_pixels_rgb666(0, 0, 3, 1, RGB666).unwrap();
+    let mut pixels = [[0; 3]; 3];
+    display.read_pixels_rgb666(0, 0, 3, 1, &mut pixels).unwrap();
+    assert_eq!(pixels, RGB666);
+
+    assert_eq!(
+        display.read_pixels_rgb666(0, 0, 2, 2, &mut pixels),
+        Err(Error::BufferLength)
+    );
+}
+
+#[test]
+fn scrolls() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+
+    display.set_scroll_area(10, 20).unwrap();
+    assert_eq!(
+        model.borrow().parameters(Command::VSCRDEF.code()),
+        [0, 10, 1, 34, 0, 20]
+    );
+    display.set_scroll_start(15).unwrap();
+    {
+        let m = model.borrow();
+        assert!(m.is_scrolling());
+        // Fixed areas stay; line 10 shows memory line 15, and the area wraps.
+        assert_eq!(m.panel_line(9), Some(9));
+        assert_eq!(m.panel_line(10), Some(15));
+        assert_eq!(m.panel_line(299), Some(14));
+        assert_eq!(m.panel_line(300), Some(300));
+    }
+
+    assert_eq!(display.set_scroll_area(300, 21), Err(Error::OutOfBounds));
+    // Inside the fixed areas.
+    assert_eq!(display.set_scroll_start(9), Err(Error::OutOfBounds));
+    assert_eq!(display.set_scroll_start(300), Err(Error::OutOfBounds));
+    assert_eq!(display.set_scroll_start(HEIGHT), Err(Error::OutOfBounds));
+
+    display.enter_normal_mode().unwrap();
+    assert!(!model.borrow().is_scrolling());
+}
+
+#[test]
+fn partial_mode() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+
+    display.set_partial_area(100, 199).unwrap();
+    display.enter_partial_mode().unwrap();
+    assert!(display.read_power_mode().unwrap().partial_mode());
+    {
+        let m = model.borrow();
+        assert_eq!(m.panel_line(99), None);
+        assert_eq!(m.panel_line(100), Some(100));
+        assert_eq!(m.panel_line(199), Some(199));
+        assert_eq!(m.panel_line(200), None);
+    }
+
+    // End before start wraps around the bottom.
+    display.set_partial_area(300, 10).unwrap();
+    assert_eq!(model.borrow().panel_line(5), Some(5));
+    assert_eq!(model.borrow().panel_line(150), None);
+    assert_eq!(display.set_partial_area(0, HEIGHT), Err(Error::OutOfBounds));
+
+    display.enter_normal_mode().unwrap();
+    assert!(!model.borrow().is_partial_mode());
+    assert_eq!(model.borrow().panel_line(150), Some(150));
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn async_reads() {
+    use embassy_futures::block_on;
+    use ili9341_ng::asynch::Ili9341;
+
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut delay = FakeDelay::new(&model);
+    let mut display = Ili9341::new(spi(&model));
+    let (id, pixels) = block_on(async {
+        display.init(&mut delay).await.unwrap();
+        display.fill_rect(0, 0, 2, 1, 0x07E0).await.unwrap();
+        let id = display.read_display_id().await.unwrap();
+        let mut pixels = [[0; 3]; 2];
+        display
+            .read_pixels_rgb666(0, 0, 2, 1, &mut pixels)
+            .await
+            .unwrap();
+        (id, pixels)
+    });
+    assert_eq!(id, MODEL_DISPLAY_ID);
+    assert_eq!(pixels, [[0, 63, 0]; 2]);
+}
+
+#[cfg(feature = "embedded-graphics")]
+#[test]
+fn embedded_graphics_rgb666() {
+    use embedded_graphics::pixelcolor::Rgb666;
+    use embedded_graphics::prelude::*;
+    use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
+
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    display.set_orientation(Orientation::Landscape).unwrap();
+
+    let mut target = display.rgb666();
+    assert_eq!(target.bounding_box().size, Size::new(320, 240));
+    Rectangle::new(Point::new(318, 0), Size::new(4, 2))
+        .into_styled(PrimitiveStyle::with_fill(Rgb666::new(1, 2, 3)))
+        .draw(&mut target)
+        .unwrap();
+    Pixel(Point::new(5, 6), Rgb666::new(63, 31, 7))
+        .draw(&mut target)
+        .unwrap();
+
+    let m = model.borrow();
+    assert_eq!(m.gram_rgb666(1, 319), [1, 2, 3]);
+    assert_eq!(m.gram_rgb666(2, 319), [0, 0, 0]);
+    assert_eq!(m.gram_rgb666(6, 5), [63, 31, 7]);
 }

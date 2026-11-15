@@ -15,6 +15,7 @@ interface!(
 driver!(
     doc = "Async ILI9341 driver.",
     interface = Interface,
+    read_interface = ReadInterface,
     delay = embedded_hal_async::delay::DelayNs,
     async = [async],
     await = [.await],

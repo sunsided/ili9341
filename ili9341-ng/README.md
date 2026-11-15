@@ -47,11 +47,30 @@ let mut display = Ili9341::new(ParallelInterface::new(bus, dc, wr));
 - 4-wire SPI, 8-bit and 16-bit 8080-I parallel interfaces
 - Initialization with the Adafruit_ILI9341 power and gamma settings, hardware reset, sleep and display on/off with datasheet timing
 - Four orientations, RGB/BGR color order, color inversion
+- 16-bit (RGB565) and 18-bit (RGB666) color on every interface
 - Area writes from pixel iterators, rectangle and screen fills, bounds checks
-- `embedded-graphics` `DrawTarget` with clipping (blocking driver)
+- Vertical scrolling with fixed top and bottom areas, partial mode
+- Reading over SPI (needs `SDO` and at most 6.6 MHz): power mode, `MADCTL`, pixel
+  format, self-diagnostic, display ID, and pixels from the frame memory
+- `embedded-graphics` `DrawTarget`s for `Rgb565` and `Rgb666`, with clipping (blocking
+  driver)
 - Raw commands via `send_command` and the [`ili9341-registers`] types
 
-Not implemented: reading from the controller, 18-bit color, scrolling, partial mode.
+Not implemented: reading over the parallel bus (it needs the `RDX` line and switching
+the data lines to inputs), idle mode, tearing effect output.
+
+```rust,ignore
+// Scroll the middle of the panel; 20 fixed lines at the top and bottom.
+display.set_scroll_area(20, 20)?;
+display.set_scroll_start(20 + offset)?;
+
+// Read back over SPI (needs SDO): pixels come as 6-bit [r, g, b].
+let mut pixels = [[0; 3]; 4];
+display.read_pixels_rgb666(0, 0, 2, 2, &mut pixels)?;
+```
+
+Scrolling and partial mode work on frame memory lines: the 320 lines along the long
+side, whatever the orientation.
 
 If colors look swapped or inverted on your module, call `set_color_order(ColorOrder::Rgb)`
 or `set_inverted(true)` after `init`.

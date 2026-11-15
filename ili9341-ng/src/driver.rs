@@ -7,13 +7,14 @@
 
 /// Generates `reset`, the `Ili9341` driver struct and its methods.
 ///
-/// - `interface` / `delay`: the interface and delay traits to build on.
+/// - `interface` / `read_interface` / `delay`: the interface and delay traits to build on.
 /// - `async`: empty, or `async` to make the methods async.
 /// - `await`: empty, or `.await` to await interface and delay calls.
 macro_rules! driver {
     (
         doc = $doc:literal,
         interface = $interface:ident,
+        read_interface = $read_interface:ident,
         delay = $delay:path,
         async = [$($asy:tt)*],
         await = [$($aw:tt)*] $(,)?
@@ -38,16 +39,26 @@ macro_rules! driver {
             interface: DI,
             madctl: $crate::registers::MemoryAccessControl,
             orientation: $crate::Orientation,
+            color_depth: $crate::ColorDepth,
+            /// The first scrolling line and the number of scrolling lines (`VSCRDEF`).
+            scroll_area: (u16, u16),
         }
 
         impl<DI> Ili9341<DI> {
             /// Creates a driver in [`Portrait`](crate::Orientation::Portrait) orientation
-            /// with [`Bgr`](crate::ColorOrder::Bgr) color order. Performs no bus access;
-            /// call [`init`](Self::init) next.
+            /// with [`Bgr`](crate::ColorOrder::Bgr) color order and
+            /// [`Bits16`](crate::ColorDepth::Bits16) color. Performs no bus access; call
+            /// [`init`](Self::init) next.
             pub fn new(interface: DI) -> Self {
                 let orientation = $crate::Orientation::Portrait;
                 let madctl = orientation.apply($crate::registers::MemoryAccessControl::new().with_bgr(true));
-                Self { interface, madctl, orientation }
+                Self {
+                    interface,
+                    madctl,
+                    orientation,
+                    color_depth: $crate::ColorDepth::Bits16,
+                    scroll_area: (0, $crate::HEIGHT),
+                }
             }
 
             /// Consumes the driver and returns the interface.
@@ -63,6 +74,20 @@ macro_rules! driver {
             /// The width and height in the current orientation.
             pub fn dimensions(&self) -> (u16, u16) {
                 self.orientation.size()
+            }
+
+            /// The current color depth.
+            pub fn color_depth(&self) -> $crate::ColorDepth {
+                self.color_depth
+            }
+
+            /// Checks that `width × height` pixels fit into a buffer of `len` pixels.
+            fn check_buffer<E>(width: u16, height: u16, len: usize) -> Result<(), $crate::Error<E>> {
+                // u32: the product overflows a 16-bit usize for a full screen.
+                match u32::try_from(len) {
+                    Ok(len) if len == u32::from(width) * u32::from(height) => Ok(()),
+                    _ => Err($crate::Error::BufferLength),
+                }
             }
 
             /// Checks that the area lies within the screen and encodes its column and page
@@ -96,7 +121,7 @@ macro_rules! driver {
             DI: $interface,
         {
             /// Initializes the controller: software reset, the Adafruit power, VCOM, frame
-            /// rate and gamma settings, 16-bit color, the stored orientation and color
+            /// rate and gamma settings, the stored color depth, orientation and color
             /// order, sleep out and display on.
             ///
             /// Takes about 240 ms. The frame memory content is undefined afterwards.
@@ -107,6 +132,7 @@ macro_rules! driver {
                 use $crate::Command;
 
                 self.send_command(Command::SWRESET, &[]) $($aw)* ?;
+                self.scroll_area = (0, $crate::HEIGHT);
                 delay.delay_ms($crate::RESET_DELAY_MS) $($aw)*;
                 for &(command, parameters) in $crate::PANEL_INIT {
                     self.interface
@@ -114,7 +140,7 @@ macro_rules! driver {
                         $($aw)*
                         .map_err($crate::Error::Interface)?;
                 }
-                self.send_command(Command::COLMOD, &[$crate::registers::PixelFormat::rgb565().into_bits()]) $($aw)* ?;
+                self.send_command(Command::COLMOD, &[self.color_depth.pixel_format().into_bits()]) $($aw)* ?;
                 self.send_command(Command::MADCTL, &[self.madctl.into_bits()]) $($aw)* ?;
                 self.send_command(Command::SLPOUT, &[]) $($aw)* ?;
                 delay.delay_ms($crate::SLEEP_OUT_DELAY_MS) $($aw)*;
@@ -152,6 +178,16 @@ macro_rules! driver {
                 self.send_command($crate::Command::MADCTL, &[self.madctl.into_bits()]) $($aw)*
             }
 
+            /// Sets the color depth of the pixel interface. The frame memory content is
+            /// kept.
+            pub $($asy)* fn set_color_depth(
+                &mut self,
+                depth: $crate::ColorDepth,
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                self.color_depth = depth;
+                self.send_command($crate::Command::COLMOD, &[depth.pixel_format().into_bits()]) $($aw)*
+            }
+
             /// Inverts the displayed colors. Some panels need this to show correct colors.
             pub $($asy)* fn set_inverted(&mut self, inverted: bool) -> Result<(), $crate::Error<DI::Error>> {
                 let command = if inverted { $crate::Command::INVON } else { $crate::Command::INVOFF };
@@ -184,6 +220,44 @@ macro_rules! driver {
                 Ok(())
             }
 
+            /// Sets the column and page address window. Returns `false` for an empty area.
+            $($asy)* fn set_window(
+                &mut self,
+                x: u16,
+                y: u16,
+                width: u16,
+                height: u16,
+            ) -> Result<bool, $crate::Error<DI::Error>> {
+                let Some((columns, pages)) = self.window(x, y, width, height)? else {
+                    return Ok(false);
+                };
+                self.send_command($crate::Command::CASET, &columns) $($aw)* ?;
+                self.send_command($crate::Command::PASET, &pages) $($aw)* ?;
+                Ok(true)
+            }
+
+            /// Writes pixels of either format into an area, converted to the color depth.
+            #[allow(private_bounds)]
+            $($asy)* fn write_pixels<P, I>(
+                &mut self,
+                x: u16,
+                y: u16,
+                width: u16,
+                height: u16,
+                pixels: I,
+            ) -> Result<(), $crate::Error<DI::Error>>
+            where
+                P: $crate::PixelData,
+                I: IntoIterator<Item = P>,
+            {
+                if !self.set_window(x, y, width, height) $($aw)* ? {
+                    return Ok(());
+                }
+                self.send_command($crate::Command::RAMWR, &[]) $($aw)* ?;
+                let bytes = $crate::pixel_bytes(pixels, self.color_depth);
+                self.interface.send_pixel_data(bytes) $($aw)* .map_err($crate::Error::Interface)
+            }
+
             /// Writes RGB565 pixels into an area, row by row.
             ///
             /// Supply `width × height` pixels. Fewer leave the rest of the area unchanged;
@@ -199,13 +273,25 @@ macro_rules! driver {
             where
                 I: IntoIterator<Item = u16>,
             {
-                let Some((columns, pages)) = self.window(x, y, width, height)? else {
-                    return Ok(());
-                };
-                self.send_command($crate::Command::CASET, &columns) $($aw)* ?;
-                self.send_command($crate::Command::PASET, &pages) $($aw)* ?;
-                self.send_command($crate::Command::RAMWR, &[]) $($aw)* ?;
-                self.interface.send_pixels(pixels) $($aw)* .map_err($crate::Error::Interface)
+                self.write_pixels(x, y, width, height, pixels) $($aw)*
+            }
+
+            /// Writes RGB666 pixels (`[r, g, b]`, components `0..=63`) into an area, row
+            /// by row, like [`draw_pixels`](Self::draw_pixels). Debug builds panic on
+            /// larger components. In 16-bit color depth, red and
+            /// blue lose their least significant bit.
+            pub $($asy)* fn draw_pixels_rgb666<I>(
+                &mut self,
+                x: u16,
+                y: u16,
+                width: u16,
+                height: u16,
+                pixels: I,
+            ) -> Result<(), $crate::Error<DI::Error>>
+            where
+                I: IntoIterator<Item = [u8; 3]>,
+            {
+                self.write_pixels(x, y, width, height, pixels) $($aw)*
             }
 
             /// Fills an area with one color.
@@ -217,9 +303,22 @@ macro_rules! driver {
                 height: u16,
                 color: u16,
             ) -> Result<(), $crate::Error<DI::Error>> {
+                self.fill(x, y, width, height, color) $($aw)*
+            }
+
+            /// Fills an area with one color of either pixel format.
+            #[allow(private_bounds)]
+            $($asy)* fn fill<P: $crate::PixelData>(
+                &mut self,
+                x: u16,
+                y: u16,
+                width: u16,
+                height: u16,
+                color: P,
+            ) -> Result<(), $crate::Error<DI::Error>> {
                 // Per row: `width * height` overflows a 16-bit `usize` for a full screen.
                 let pixels = (0..height).flat_map(|_| core::iter::repeat_n(color, width.into()));
-                self.draw_pixels(x, y, width, height, pixels) $($aw)*
+                self.write_pixels(x, y, width, height, pixels) $($aw)*
             }
 
             /// Fills the whole screen with one color.
@@ -231,6 +330,151 @@ macro_rules! driver {
             /// Sets a single pixel.
             pub $($asy)* fn set_pixel(&mut self, x: u16, y: u16, color: u16) -> Result<(), $crate::Error<DI::Error>> {
                 self.draw_pixels(x, y, 1, 1, [color]) $($aw)*
+            }
+
+            /// Defines the vertical scrolling area: the frame memory lines between
+            /// `top_fixed` lines at the top and `bottom_fixed` lines at the bottom scroll;
+            /// the fixed lines stay in place.
+            ///
+            /// Lines run along the 320-pixel side of the panel, whatever the orientation.
+            /// Scrolling starts with [`set_scroll_start`](Self::set_scroll_start).
+            pub $($asy)* fn set_scroll_area(
+                &mut self,
+                top_fixed: u16,
+                bottom_fixed: u16,
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                let Some(scrolling) = $crate::HEIGHT
+                    .checked_sub(top_fixed)
+                    .and_then(|rest| rest.checked_sub(bottom_fixed))
+                else {
+                    return Err($crate::Error::OutOfBounds);
+                };
+                let [t0, t1] = top_fixed.to_be_bytes();
+                let [s0, s1] = scrolling.to_be_bytes();
+                let [b0, b1] = bottom_fixed.to_be_bytes();
+                self.send_command($crate::Command::VSCRDEF, &[t0, t1, s0, s1, b0, b1]) $($aw)* ?;
+                self.scroll_area = (top_fixed, scrolling);
+                Ok(())
+            }
+
+            /// Enters vertical scroll mode: `line` is the frame memory line shown right
+            /// below the top fixed area. It must lie within the scrolling area set by
+            /// [`set_scroll_area`](Self::set_scroll_area), or the whole screen without one.
+            ///
+            /// The controller ignores this in partial mode.
+            /// [`enter_normal_mode`](Self::enter_normal_mode) leaves scroll mode.
+            pub $($asy)* fn set_scroll_start(&mut self, line: u16) -> Result<(), $crate::Error<DI::Error>> {
+                let (top, scrolling) = self.scroll_area;
+                if !(top..top + scrolling).contains(&line) {
+                    return Err($crate::Error::OutOfBounds);
+                }
+                self.send_command($crate::Command::VSCRSADD, &line.to_be_bytes()) $($aw)*
+            }
+
+            /// Defines the partial area: frame memory lines `start` to `end`, inclusive.
+            /// With `end < start`, the area wraps around the bottom.
+            pub $($asy)* fn set_partial_area(
+                &mut self,
+                start: u16,
+                end: u16,
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                if start >= $crate::HEIGHT || end >= $crate::HEIGHT {
+                    return Err($crate::Error::OutOfBounds);
+                }
+                let range = $crate::registers::address_range(start, end);
+                self.send_command($crate::Command::PTLAR, &range) $($aw)*
+            }
+
+            /// Enters partial mode: only the partial area is shown. Leaves scroll mode.
+            pub $($asy)* fn enter_partial_mode(&mut self) -> Result<(), $crate::Error<DI::Error>> {
+                self.send_command($crate::Command::PTLON, &[]) $($aw)*
+            }
+
+            /// Enters normal display mode: leaves partial mode and scroll mode.
+            pub $($asy)* fn enter_normal_mode(&mut self) -> Result<(), $crate::Error<DI::Error>> {
+                self.send_command($crate::Command::NORON, &[]) $($aw)*
+            }
+        }
+
+        impl<DI> Ili9341<DI>
+        where
+            DI: $read_interface,
+        {
+            /// Sends a read command and reads its response.
+            $($asy)* fn read(
+                &mut self,
+                command: $crate::Command,
+                dummy_byte: bool,
+                buffer: &mut [u8],
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                self.interface
+                    .read(command.code(), dummy_byte, buffer)
+                    $($aw)*
+                    .map_err($crate::Error::Interface)
+            }
+
+            /// Reads one byte from an 8-bit read command.
+            $($asy)* fn read_u8(&mut self, command: $crate::Command) -> Result<u8, $crate::Error<DI::Error>> {
+                let mut buffer = [0];
+                self.read(command, false, &mut buffer) $($aw)* ?;
+                Ok(buffer[0])
+            }
+
+            /// Reads the display power mode (`RDDPM`).
+            pub $($asy)* fn read_power_mode(&mut self) -> Result<$crate::registers::PowerMode, $crate::Error<DI::Error>> {
+                Ok($crate::registers::PowerMode::from_bits(self.read_u8($crate::Command::RDDPM) $($aw)* ?))
+            }
+
+            /// Reads the memory access control (`RDDMADCTL`).
+            pub $($asy)* fn read_memory_access_control(
+                &mut self,
+            ) -> Result<$crate::registers::MemoryAccessControl, $crate::Error<DI::Error>> {
+                Ok($crate::registers::MemoryAccessControl::from_bits(self.read_u8($crate::Command::RDDMADCTL) $($aw)* ?))
+            }
+
+            /// Reads the pixel format (`RDDCOLMOD`).
+            pub $($asy)* fn read_pixel_format(&mut self) -> Result<$crate::registers::PixelFormat, $crate::Error<DI::Error>> {
+                Ok($crate::registers::PixelFormat::from_bits(self.read_u8($crate::Command::RDDCOLMOD) $($aw)* ?))
+            }
+
+            /// Reads the self-diagnostic result (`RDDSDR`): bit 7 reports that the
+            /// register values loaded correctly, bit 6 that the display works.
+            pub $($asy)* fn read_self_diagnostic(&mut self) -> Result<u8, $crate::Error<DI::Error>> {
+                self.read_u8($crate::Command::RDDSDR) $($aw)*
+            }
+
+            /// Reads the display identification (`RDDIDIF`): manufacturer ID, module or
+            /// driver version, and module or driver ID. The values depend on the module.
+            pub $($asy)* fn read_display_id(&mut self) -> Result<[u8; 3], $crate::Error<DI::Error>> {
+                // One dummy clock precedes the 24 data bits.
+                let mut buffer = [0; 4];
+                self.read($crate::Command::RDDIDIF, false, &mut buffer) $($aw)* ?;
+                let [a, b, c, _] = (u32::from_be_bytes(buffer) << 1).to_be_bytes();
+                Ok([a, b, c])
+            }
+
+            /// Reads pixels from an area of the frame memory, row by row, as RGB666
+            /// (`[r, g, b]`, 6-bit components) whatever the color depth.
+            ///
+            /// `pixels` must hold exactly `width × height` pixels. Pixels written in
+            /// 16-bit color have red and blue expanded by the controller.
+            pub $($asy)* fn read_pixels_rgb666(
+                &mut self,
+                x: u16,
+                y: u16,
+                width: u16,
+                height: u16,
+                pixels: &mut [[u8; 3]],
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                Self::check_buffer(width, height, pixels.len())?;
+                if !self.set_window(x, y, width, height) $($aw)* ? {
+                    return Ok(());
+                }
+                // One dummy byte precedes the pixels; components arrive in the upper six bits.
+                let bytes = pixels.as_flattened_mut();
+                self.read($crate::Command::RAMRD, true, bytes) $($aw)* ?;
+                bytes.iter_mut().for_each(|byte| *byte >>= 2);
+                Ok(())
             }
         }
     };

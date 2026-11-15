@@ -2,8 +2,10 @@
 
 use embedded_hal::digital::{OutputPin, PinState};
 
-/// How many bytes [`SpiInterface`] buffers per SPI write when streaming pixels.
-pub(crate) const SPI_CHUNK: usize = 64;
+/// How many bytes [`SpiInterface`] buffers per SPI write when streaming pixel data.
+///
+/// Each chunk is one SPI transaction; a full screen in 16-bit color takes 600.
+pub(crate) const SPI_CHUNK: usize = 256;
 
 /// An interface error.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -18,8 +20,11 @@ pub enum InterfaceError<B, P> {
 /// 4-wire SPI: an [`SpiDevice`](embedded_hal::spi::SpiDevice) (with `CSX` as its chip
 /// select) and the `D/CX` pin.
 ///
-/// Implements the blocking [`Interface`](crate::Interface) and, with the `async` feature,
-/// `asynch::Interface` when `SPI` implements the respective `SpiDevice`.
+/// Implements the blocking [`Interface`](crate::Interface) and
+/// [`ReadInterface`](crate::ReadInterface) and, with the `async` feature, their `asynch`
+/// counterparts when `SPI` implements the respective `SpiDevice`. Reading needs `SDO` (or
+/// a bidirectional `SDA`) connected to MISO, and an SPI clock of at most 6.6 MHz: the
+/// datasheet's read clock cycle is 150 ns, against 100 ns for writes.
 #[derive(Debug)]
 pub struct SpiInterface<SPI, DC> {
     pub(crate) spi: SPI,
@@ -40,26 +45,24 @@ impl<SPI, DC> SpiInterface<SPI, DC> {
 
 /// A word on the parallel data bus: `u8` for 8-bit, `u16` for 16-bit.
 pub trait Word: Copy + From<u8> {
-    /// The words of one RGB565 pixel.
-    type Pixel: AsRef<[Self]>;
-
-    /// Splits an RGB565 pixel into bus words, first word first.
-    fn from_pixel(pixel: u16) -> Self::Pixel;
+    /// Takes the next bus word of pixel data from a byte stream, or `None` at its end.
+    ///
+    /// The 16-bit bus carries two bytes per word, first byte on `D[15:8]`; this is the
+    /// datasheet's 16-bit pixel format, and its default (`MDT = 00`) 18-bit format. A
+    /// trailing odd byte is padded with zeros.
+    fn next_from<I: Iterator<Item = u8>>(bytes: &mut I) -> Option<Self>;
 }
 
 impl Word for u8 {
-    type Pixel = [u8; 2];
-
-    fn from_pixel(pixel: u16) -> Self::Pixel {
-        pixel.to_be_bytes()
+    fn next_from<I: Iterator<Item = u8>>(bytes: &mut I) -> Option<Self> {
+        bytes.next()
     }
 }
 
 impl Word for u16 {
-    type Pixel = [u16; 1];
-
-    fn from_pixel(pixel: u16) -> Self::Pixel {
-        [pixel]
+    fn next_from<I: Iterator<Item = u8>>(bytes: &mut I) -> Option<Self> {
+        let high = bytes.next()?;
+        Some(u16::from_be_bytes([high, bytes.next().unwrap_or(0)]))
     }
 }
 
@@ -172,25 +175,24 @@ where
             .try_for_each(|&parameter| self.write_word(parameter.into()))
     }
 
-    pub(crate) fn pixels<I>(
+    pub(crate) fn pixel_data<I>(
         &mut self,
-        pixels: I,
+        bytes: I,
     ) -> Result<(), InterfaceError<BUS::Error, DC::Error>>
     where
-        I: IntoIterator<Item = u16>,
+        I: IntoIterator<Item = u8>,
     {
         self.dc.set_high().map_err(InterfaceError::Pin)?;
-        for pixel in pixels {
-            for &word in BUS::Word::from_pixel(pixel).as_ref() {
-                self.write_word(word)?;
-            }
+        let mut bytes = bytes.into_iter();
+        while let Some(word) = BUS::Word::next_from(&mut bytes) {
+            self.write_word(word)?;
         }
         Ok(())
     }
 }
 
-/// Generates the `Interface` trait and its implementations for [`SpiInterface`] and
-/// [`ParallelInterface`].
+/// Generates the `Interface` and `ReadInterface` traits and their implementations for
+/// [`SpiInterface`] and [`ParallelInterface`].
 ///
 /// - `spi`: the `SpiDevice` trait to build on.
 /// - `async`: empty, or `async` to make the methods async.
@@ -214,10 +216,19 @@ macro_rules! interface {
             /// Sends a command and its parameters.
             $($asy)* fn send_command(&mut self, command: u8, parameters: &[u8]) -> Result<(), Self::Error>;
 
-            /// Sends RGB565 pixel data, most significant byte first.
-            $($asy)* fn send_pixels<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+            /// Sends pixel data as the byte stream of the 8-bit formats: two bytes per
+            /// RGB565 pixel, three per RGB666 pixel. A 16-bit bus packs two bytes per word.
+            $($asy)* fn send_pixel_data<I>(&mut self, bytes: I) -> Result<(), Self::Error>
             where
-                I: IntoIterator<Item = u16>;
+                I: IntoIterator<Item = u8>;
+        }
+
+        /// An [`Interface`] that can read from the controller.
+        #[allow(async_fn_in_trait)]
+        pub trait ReadInterface: Interface {
+            /// Sends a read command with `D/CX` low and reads its response into `buffer`
+            /// in the same transaction, after skipping one dummy byte if `dummy_byte`.
+            $($asy)* fn read(&mut self, command: u8, dummy_byte: bool, buffer: &mut [u8]) -> Result<(), Self::Error>;
         }
 
         impl<SPI, DC> Interface for $crate::SpiInterface<SPI, DC>
@@ -237,9 +248,9 @@ macro_rules! interface {
                 Ok(())
             }
 
-            $($asy)* fn send_pixels<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+            $($asy)* fn send_pixel_data<I>(&mut self, bytes: I) -> Result<(), Self::Error>
             where
-                I: IntoIterator<Item = u16>,
+                I: IntoIterator<Item = u8>,
             {
                 self.dc.set_high().map_err($crate::InterfaceError::Pin)?;
 
@@ -247,9 +258,9 @@ macro_rules! interface {
                 // memory across chip-select cycles until the next command.
                 let mut buffer = [0; $crate::interface::SPI_CHUNK];
                 let mut len = 0;
-                for pixel in pixels {
-                    buffer[len..len + 2].copy_from_slice(&pixel.to_be_bytes());
-                    len += 2;
+                for byte in bytes {
+                    buffer[len] = byte;
+                    len += 1;
                     if len == buffer.len() {
                         self.spi.write(&buffer) $($aw)* .map_err($crate::InterfaceError::Bus)?;
                         len = 0;
@@ -259,6 +270,30 @@ macro_rules! interface {
                     self.spi.write(&buffer[..len]) $($aw)* .map_err($crate::InterfaceError::Bus)?;
                 }
                 Ok(())
+            }
+        }
+
+        impl<SPI, DC> ReadInterface for $crate::SpiInterface<SPI, DC>
+        where
+            SPI: $spi,
+            DC: embedded_hal::digital::OutputPin,
+        {
+            $($asy)* fn read(&mut self, command: u8, dummy_byte: bool, buffer: &mut [u8]) -> Result<(), Self::Error> {
+                use embedded_hal::spi::Operation;
+
+                // D/CX cannot change within one SPI transaction; the datasheet's read
+                // timing only requires it low for the command byte.
+                self.dc.set_low().map_err($crate::InterfaceError::Pin)?;
+                let mut dummy = [0];
+                let dummy = &mut dummy[..usize::from(dummy_byte)];
+                self.spi
+                    .transaction(&mut [
+                        Operation::Write(&[command]),
+                        Operation::Read(dummy),
+                        Operation::Read(buffer),
+                    ])
+                    $($aw)*
+                    .map_err($crate::InterfaceError::Bus)
             }
         }
 
@@ -274,11 +309,11 @@ macro_rules! interface {
                 self.command(command, parameters)
             }
 
-            $($asy)* fn send_pixels<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+            $($asy)* fn send_pixel_data<I>(&mut self, bytes: I) -> Result<(), Self::Error>
             where
-                I: IntoIterator<Item = u16>,
+                I: IntoIterator<Item = u8>,
             {
-                self.pixels(pixels)
+                self.pixel_data(bytes)
             }
         }
     };

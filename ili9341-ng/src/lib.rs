@@ -5,7 +5,7 @@
 //! This driver was built using [`embedded-hal`] 1.0 and [`ili9341-registers`]. Enable the
 //! `async` feature for an equivalent driver on [`embedded-hal-async`] in the `asynch`
 //! module, and the `embedded-graphics` feature for a [`DrawTarget`] implementation on the
-//! blocking driver.
+//! blocking driver: `Rgb565` on the driver, `Rgb666` through `Ili9341::rgb666`.
 //!
 //! ## Interfaces
 //!
@@ -16,12 +16,19 @@
 //!   [`OutputBus`]. [`GpioBus`] implements it on individual pins; implement [`OutputBus`]
 //!   yourself for a faster port write.
 //!
-//! The controller is write-only in this driver: reading needs the `SDO`/`RDX` lines,
-//! which many modules do not connect.
+//! Reading works over SPI only ([`ReadInterface`]), and needs `SDO` connected, which
+//! many modules leave open.
 //!
 //! ## Pixels
 //!
-//! The driver configures 16-bit color (RGB565). Pixels are `u16` values in RGB565.
+//! The controller runs in 16-bit (RGB565) or 18-bit (RGB666) color, see [`ColorDepth`].
+//! Either way, the driver takes RGB565 pixels as `u16` and RGB666 pixels as `[r, g, b]`
+//! with 6-bit components, and converts them to the configured depth.
+//!
+//! ## Scrolling and partial mode
+//!
+//! Both work on frame memory lines: the 320 lines along the long side of the panel,
+//! independent of the [`Orientation`]. In landscape, they scroll or limit columns.
 //!
 //! [`embedded-hal`]: https://crates.io/crates/embedded-hal
 //! [`embedded-hal-async`]: https://crates.io/crates/embedded-hal-async
@@ -46,6 +53,8 @@ pub mod asynch;
 #[cfg(feature = "embedded-graphics")]
 mod graphics;
 
+#[cfg(feature = "embedded-graphics")]
+pub use graphics::Rgb666Target;
 pub use ili9341_registers as registers;
 pub use ili9341_registers::{Command, HEIGHT, WIDTH};
 pub use interface::{GpioBus, InterfaceError, OutputBus, ParallelInterface, SpiInterface, Word};
@@ -123,14 +132,97 @@ const PANEL_INIT: &[(u8, &[u8])] = &[
     ),
 ];
 
+/// The color depth of the controller's pixel interface (`COLMOD`).
+///
+/// The frame memory always holds 18 bits per pixel; in 16-bit mode, the controller
+/// expands red and blue from 5 to 6 bits.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum ColorDepth {
+    /// RGB565: two bytes per pixel.
+    #[default]
+    Bits16,
+    /// RGB666: three bytes per pixel.
+    Bits18,
+}
+
+impl ColorDepth {
+    /// The `COLMOD` parameter.
+    pub const fn pixel_format(self) -> registers::PixelFormat {
+        let bpp = match self {
+            Self::Bits16 => registers::PixelFormat::BPP_16,
+            Self::Bits18 => registers::PixelFormat::BPP_18,
+        };
+        registers::PixelFormat::new().with_dpi(bpp).with_dbi(bpp)
+    }
+}
+
+/// Converts an RGB565 pixel into 6-bit `[r, g, b]` components, copying the most
+/// significant bit of red and blue into their new least significant bit.
+pub const fn rgb565_to_rgb666(pixel: u16) -> [u8; 3] {
+    let r = (pixel >> 11) as u8;
+    let g = (pixel >> 5) as u8 & 0x3F;
+    let b = pixel as u8 & 0x1F;
+    [r << 1 | r >> 4, g, b << 1 | b >> 4]
+}
+
+/// Converts 6-bit `[r, g, b]` components into an RGB565 pixel, dropping the least
+/// significant bit of red and blue.
+pub const fn rgb666_to_rgb565([r, g, b]: [u8; 3]) -> u16 {
+    ((r as u16 & 0x3E) << 10) | ((g as u16 & 0x3F) << 5) | ((b as u16 & 0x3E) >> 1)
+}
+
+/// A pixel the driver can send in either color depth.
+trait PixelData: Copy {
+    /// The bytes of the pixel in `depth`; the first `len` of the array are used.
+    fn encode(self, depth: ColorDepth) -> ([u8; 3], usize);
+}
+
+impl PixelData for u16 {
+    fn encode(self, depth: ColorDepth) -> ([u8; 3], usize) {
+        match depth {
+            ColorDepth::Bits16 => {
+                let [high, low] = self.to_be_bytes();
+                ([high, low, 0], 2)
+            }
+            ColorDepth::Bits18 => rgb565_to_rgb666(self).encode(depth),
+        }
+    }
+}
+
+impl PixelData for [u8; 3] {
+    fn encode(self, depth: ColorDepth) -> ([u8; 3], usize) {
+        // 8-bit components would wrap silently, e.g. 128 into black.
+        debug_assert!(self.iter().all(|&c| c < 64), "RGB666 components are 0..=63");
+        match depth {
+            ColorDepth::Bits16 => rgb666_to_rgb565(self).encode(depth),
+            // Components sit in the upper six bits of each byte.
+            ColorDepth::Bits18 => (self.map(|c| c << 2), 3),
+        }
+    }
+}
+
+/// The pixel data bytes of `pixels` in `depth`.
+fn pixel_bytes<P: PixelData>(
+    pixels: impl IntoIterator<Item = P>,
+    depth: ColorDepth,
+) -> impl Iterator<Item = u8> {
+    pixels.into_iter().flat_map(move |pixel| {
+        let (bytes, len) = pixel.encode(depth);
+        bytes.into_iter().take(len)
+    })
+}
+
 /// A driver error.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error<E> {
     /// The interface failed.
     Interface(E),
-    /// The area does not lie within the screen.
+    /// The area, line or scroll region does not lie within the screen.
     OutOfBounds,
+    /// The buffer length does not match the area.
+    BufferLength,
 }
 
 /// The display orientation, as a rotation of the portrait panel.
@@ -205,6 +297,7 @@ interface!(
 driver!(
     doc = "ILI9341 driver.",
     interface = Interface,
+    read_interface = ReadInterface,
     delay = embedded_hal::delay::DelayNs,
     async = [],
     await = [],

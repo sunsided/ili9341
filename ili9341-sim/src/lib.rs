@@ -5,12 +5,24 @@
 //! ([`FakeSpi`] plus a [`SimPin`] as `D/CX`) and of the 8-bit and 16-bit 8080-I parallel
 //! interfaces ([`SimPin`]s as data lines, `D/CX` and `WRX`).
 //!
-//! The model implements the frame memory, the column and page address window, `MADCTL`
-//! address mapping, `COLMOD`, sleep, display and inversion state, hardware and software
-//! reset, and the command timing rules of the datasheet: commands sent too early after a
-//! reset or sleep transition are ignored and counted, as the real chip ignores them.
+//! The model implements the 18-bit frame memory, the column and page address window,
+//! `MADCTL` address mapping, 16-bit and 18-bit pixel data, sleep, display, inversion,
+//! partial and scroll state, hardware and software reset, and the command timing rules
+//! of the datasheet: commands sent too early after a reset or sleep transition are
+//! ignored and counted, as the real chip ignores them.
 //!
-//! Only 16-bit color is modeled; pixel data in other formats is stored as if 16-bit.
+//! Over SPI, it answers the read commands `RDDIDIF`, `RDDPM`, `RDDMADCTL`, `RDDCOLMOD`,
+//! `RDDSDR` and `RAMRD` with the datasheet's dummy cycles.
+//!
+//! ## Assumptions
+//!
+//! - 16-bit pixels are expanded to the 18-bit frame memory by copying the most
+//!   significant bit of red and blue into their least significant bit. The real chip
+//!   uses its color lookup table (`RGBSET`), whose content the datasheet leaves undefined
+//!   after a hardware reset.
+//! - The 16-bit bus uses the default 18-bit transfer mode (`MDT = 00`): two bytes of the
+//!   8-bit pixel stream per word.
+//! - `MADCTL` `ML` (vertical refresh order) is ignored for scrolling and partial mode.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -21,11 +33,15 @@ mod pins;
 pub use pins::{Line, SimPin};
 
 use fake_bus::{Clock, SpiTarget};
-use ili9341_registers::{Command, HEIGHT, MemoryAccessControl, WIDTH};
+use ili9341_registers::{Command, HEIGHT, MemoryAccessControl, PixelFormat, PowerMode, WIDTH};
 
 /// An SPI device with an [`Ili9341Model`] attached; pair it with a [`SimPin`] on
 /// [`Line::Dc`].
 pub type FakeSpi<'a> = fake_bus::FakeSpi<'a, Ili9341Model>;
+
+/// The display identification the model returns for `RDDIDIF`. Real modules return
+/// module-specific values.
+pub const MODEL_DISPLAY_ID: [u8; 3] = [0x8A, 0x93, 0x41];
 
 /// The bus the model listens on, as strapped by the `IM[3:0]` pins.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -50,11 +66,25 @@ const MAX_PARAMETERS: usize = 15;
 
 const PIXELS: usize = WIDTH as usize * HEIGHT as usize;
 
+/// A read in progress on the SPI bus; it ends when chip select deasserts.
+#[derive(Debug, Copy, Clone)]
+enum Read {
+    /// A fixed response, sent byte by byte.
+    Bytes { data: [u8; 5], len: u8, pos: u8 },
+    /// `RAMRD`: one dummy byte, then three bytes per pixel from the write pointer on.
+    Memory {
+        dummy: bool,
+        pixel: [u8; 3],
+        pos: u8,
+    },
+}
+
 /// The behavioral model of an ILI9341.
 #[derive(Debug, Clone)]
 pub struct Ili9341Model {
     mode: InterfaceMode,
-    gram: [u16; PIXELS],
+    /// 6-bit `[r, g, b]` per pixel.
+    gram: [[u8; 3]; PIXELS],
     now_ns: u64,
     busy_until_ns: u64,
     sleep_toggle_at_ns: u64,
@@ -71,7 +101,9 @@ pub struct Ili9341Model {
     parameters: [u8; MAX_PARAMETERS],
     parameter_count: usize,
     last_parameters: [([u8; MAX_PARAMETERS], u8); 256],
-    pixel_high_byte: Option<u8>,
+    pixel_bytes: [u8; 3],
+    pixel_byte_count: usize,
+    read: Option<Read>,
 
     // Controller state.
     madctl: MemoryAccessControl,
@@ -82,6 +114,12 @@ pub struct Ili9341Model {
     columns: (u16, u16),
     pages: (u16, u16),
     pointer: (u16, u16),
+    partial_mode: bool,
+    partial_area: (u16, u16),
+    scrolling: bool,
+    /// Top fixed, scrolling and bottom fixed lines.
+    scroll_area: (u16, u16, u16),
+    scroll_start: u16,
 }
 
 impl Ili9341Model {
@@ -90,7 +128,7 @@ impl Ili9341Model {
     pub fn new(mode: InterfaceMode) -> Self {
         let mut model = Self {
             mode,
-            gram: [0; PIXELS],
+            gram: [[0; 3]; PIXELS],
             now_ns: 0,
             busy_until_ns: 0,
             sleep_toggle_at_ns: 0,
@@ -103,7 +141,9 @@ impl Ili9341Model {
             parameters: [0; MAX_PARAMETERS],
             parameter_count: 0,
             last_parameters: [([0; MAX_PARAMETERS], 0); 256],
-            pixel_high_byte: None,
+            pixel_bytes: [0; 3],
+            pixel_byte_count: 0,
+            read: None,
             madctl: MemoryAccessControl::new(),
             colmod: 0,
             sleeping: true,
@@ -112,15 +152,26 @@ impl Ili9341Model {
             columns: (0, 0),
             pages: (0, 0),
             pointer: (0, 0),
+            partial_mode: false,
+            partial_area: (0, 0),
+            scrolling: false,
+            scroll_area: (0, 0, 0),
+            scroll_start: 0,
         };
         model.reset();
         (model.busy_until_ns, model.sleep_toggle_at_ns) = (0, 0);
         model
     }
 
-    /// The frame memory word at a memory column (`0..240`) and row (`0..320`), unaffected
-    /// by `MADCTL`.
+    /// The frame memory pixel at a memory column (`0..240`) and row (`0..320`) as RGB565,
+    /// unaffected by `MADCTL`. Red and blue lose their least significant bit.
     pub fn gram(&self, column: u16, row: u16) -> u16 {
+        let [r, g, b] = self.gram_rgb666(column, row);
+        (u16::from(r >> 1) << 11) | (u16::from(g) << 5) | u16::from(b >> 1)
+    }
+
+    /// The frame memory pixel at a memory column and row as 6-bit `[r, g, b]`.
+    pub fn gram_rgb666(&self, column: u16, row: u16) -> [u8; 3] {
         self.gram[usize::from(row) * usize::from(WIDTH) + usize::from(column)]
     }
 
@@ -149,6 +200,41 @@ impl Ili9341Model {
         self.inverted
     }
 
+    /// Whether partial mode is on.
+    pub fn is_partial_mode(&self) -> bool {
+        self.partial_mode
+    }
+
+    /// Whether vertical scroll mode is on.
+    pub fn is_scrolling(&self) -> bool {
+        self.scrolling
+    }
+
+    /// The frame memory line the panel shows at display line `line` (`0..320`), after
+    /// scrolling; `None` outside the partial area in partial mode.
+    pub fn panel_line(&self, line: u16) -> Option<u16> {
+        if line >= HEIGHT {
+            return None;
+        }
+        if self.partial_mode {
+            let (start, end) = self.partial_area;
+            let inside = if start <= end {
+                (start..=end).contains(&line)
+            } else {
+                line >= start || line <= end
+            };
+            if !inside {
+                return None;
+            }
+        }
+        let (top, scrolling, _) = self.scroll_area;
+        if self.scrolling && scrolling > 0 && (top..top + scrolling).contains(&line) {
+            let offset = i32::from(self.scroll_start) - i32::from(top) + i32::from(line - top);
+            return Some(top + offset.rem_euclid(i32::from(scrolling)) as u16);
+        }
+        Some(line)
+    }
+
     /// The parameters last sent with a command, also for commands the model does not
     /// otherwise implement. Pixel data is not recorded.
     pub fn parameters(&self, command: u8) -> &[u8] {
@@ -172,8 +258,14 @@ impl Ili9341Model {
         self.inverted = false;
         self.columns = (0, WIDTH - 1);
         self.pages = (0, HEIGHT - 1);
+        self.partial_mode = false;
+        self.partial_area = (0, HEIGHT - 1);
+        self.scrolling = false;
+        self.scroll_area = (0, HEIGHT, 0);
+        self.scroll_start = 0;
         self.command = None;
-        self.pixel_high_byte = None;
+        self.pixel_byte_count = 0;
+        self.read = None;
         self.start_timing(true);
     }
 
@@ -189,7 +281,7 @@ impl Ili9341Model {
     /// parameter byte or pixel data.
     ///
     /// SPI and the 8-bit bus deliver bytes; the 16-bit bus delivers words, of which
-    /// commands and parameters use the low byte.
+    /// commands and parameters use the low byte, and pixel data both bytes, high first.
     pub fn receive(&mut self, word: u16, dc: bool) {
         if self.in_reset {
             return;
@@ -204,7 +296,7 @@ impl Ili9341Model {
     fn receive_command(&mut self, code: u8) {
         self.command = None;
         self.parameter_count = 0;
-        self.pixel_high_byte = None;
+        self.pixel_byte_count = 0;
 
         if self.now_ns < self.busy_until_ns {
             self.ignored_commands += 1;
@@ -226,11 +318,97 @@ impl Ili9341Model {
             c if c == Command::DISPOFF.code() => self.display_on = false,
             c if c == Command::INVON.code() => self.inverted = true,
             c if c == Command::INVOFF.code() => self.inverted = false,
+            c if c == Command::PTLON.code() => (self.partial_mode, self.scrolling) = (true, false),
+            c if c == Command::NORON.code() => (self.partial_mode, self.scrolling) = (false, false),
             c if c == Command::RAMWR.code() => {
                 self.pointer = (self.columns.0, self.pages.0);
                 self.command = Some(code);
             }
+            c if c == Command::RAMRD.code() => {
+                self.pointer = (self.columns.0, self.pages.0);
+                self.read = Some(Read::Memory {
+                    dummy: true,
+                    pixel: [0; 3],
+                    pos: 3,
+                });
+            }
+            c if c == Command::RDDIDIF.code() => {
+                // One dummy clock, then 24 bits.
+                let [a, b, c] = MODEL_DISPLAY_ID;
+                let bits = u32::from_be_bytes([0, a, b, c]) << 7;
+                let [d0, d1, d2, d3] = bits.to_be_bytes();
+                self.respond(&[d0, d1, d2, d3]);
+            }
+            c if c == Command::RDDPM.code() => {
+                let mode = PowerMode::new()
+                    .with_booster_on(!self.sleeping)
+                    .with_partial_mode(self.partial_mode)
+                    .with_sleep_out(!self.sleeping)
+                    .with_normal_mode(!self.partial_mode)
+                    .with_display_on(self.display_on);
+                self.respond(&[mode.into_bits()]);
+            }
+            c if c == Command::RDDMADCTL.code() => self.respond(&[self.madctl.into_bits()]),
+            c if c == Command::RDDCOLMOD.code() => self.respond(&[self.colmod]),
+            c if c == Command::RDDSDR.code() => {
+                self.respond(&[if self.sleeping { 0x00 } else { 0xC0 }])
+            }
             _ => self.command = Some(code),
+        }
+    }
+
+    /// Starts sending a fixed response on the next SPI transfers.
+    fn respond(&mut self, response: &[u8]) {
+        let mut data = [0; 5];
+        data[..response.len()].copy_from_slice(response);
+        let len = response.len() as u8;
+        self.read = Some(Read::Bytes { data, len, pos: 0 });
+    }
+
+    /// The next byte of the read in progress.
+    fn read_byte(&mut self) -> u8 {
+        match self.read {
+            Some(Read::Bytes { data, len, pos }) if pos < len => {
+                self.read = Some(Read::Bytes {
+                    data,
+                    len,
+                    pos: pos + 1,
+                });
+                data[usize::from(pos)]
+            }
+            Some(Read::Memory {
+                dummy: true,
+                pixel,
+                pos,
+            }) => {
+                self.read = Some(Read::Memory {
+                    dummy: false,
+                    pixel,
+                    pos,
+                });
+                0
+            }
+            Some(Read::Memory {
+                dummy: false,
+                mut pixel,
+                mut pos,
+            }) => {
+                if pos == 3 {
+                    let (column, page) = self.pointer;
+                    pixel = self
+                        .memory_index(column, page)
+                        .map_or([0; 3], |index| self.gram[index].map(|c| c << 2));
+                    self.advance_pointer();
+                    pos = 0;
+                }
+                self.read = Some(Read::Memory {
+                    dummy: false,
+                    pixel,
+                    pos: pos + 1,
+                });
+                pixel[usize::from(pos)]
+            }
+            _ => 0,
         }
     }
 
@@ -241,12 +419,13 @@ impl Ili9341Model {
 
         if command == Command::RAMWR.code() || command == Command::WRITE_MEMORY_CONTINUE.code() {
             match self.mode {
-                InterfaceMode::Parallel16 => self.write_pixel(word),
+                InterfaceMode::Parallel16 => {
+                    let [high, low] = word.to_be_bytes();
+                    self.receive_pixel_byte(high);
+                    self.receive_pixel_byte(low);
+                }
                 InterfaceMode::Spi | InterfaceMode::Parallel8 => {
-                    match self.pixel_high_byte.take() {
-                        None => self.pixel_high_byte = Some(word as u8),
-                        Some(high) => self.write_pixel(u16::from_be_bytes([high, word as u8])),
-                    }
+                    self.receive_pixel_byte(word as u8)
                 }
             }
             return;
@@ -259,28 +438,60 @@ impl Ili9341Model {
                 (self.parameters, self.parameter_count as u8);
         }
         let p = self.parameters;
-        let range = (
-            u16::from_be_bytes([p[0], p[1]]),
-            u16::from_be_bytes([p[2], p[3]]),
-        );
+        let word_at = |i: usize| u16::from_be_bytes([p[i], p[i + 1]]);
         match (command, self.parameter_count) {
             (c, 1) if c == Command::MADCTL.code() => {
                 self.madctl = MemoryAccessControl::from_bits(p[0])
             }
             (c, 1) if c == Command::COLMOD.code() => self.colmod = p[0],
-            (c, 4) if c == Command::CASET.code() => self.columns = range,
-            (c, 4) if c == Command::PASET.code() => self.pages = range,
+            (c, 4) if c == Command::CASET.code() => self.columns = (word_at(0), word_at(2)),
+            (c, 4) if c == Command::PASET.code() => self.pages = (word_at(0), word_at(2)),
+            (c, 4) if c == Command::PTLAR.code() => self.partial_area = (word_at(0), word_at(2)),
+            (c, 6) if c == Command::VSCRDEF.code() => {
+                self.scroll_area = (word_at(0), word_at(2), word_at(4))
+            }
+            (c, 2) if c == Command::VSCRSADD.code() && !self.partial_mode => {
+                (self.scroll_start, self.scrolling) = (word_at(0), true)
+            }
             _ => {}
         }
     }
 
-    /// Stores a pixel at the write pointer and advances it row by row within the window.
-    fn write_pixel(&mut self, pixel: u16) {
+    /// Collects the bytes of one pixel: two in 16-bit color, three in 18-bit color.
+    fn receive_pixel_byte(&mut self, byte: u8) {
+        self.pixel_bytes[self.pixel_byte_count] = byte;
+        self.pixel_byte_count += 1;
+        let sixteen_bit = PixelFormat::from_bits(self.colmod).dbi() == PixelFormat::BPP_16;
+        let [b0, b1, b2] = self.pixel_bytes;
+        let pixel = match (sixteen_bit, self.pixel_byte_count) {
+            (true, 2) => {
+                let pixel = u16::from_be_bytes([b0, b1]);
+                let (r, g, b) = (
+                    (pixel >> 11) as u8,
+                    (pixel >> 5) as u8 & 0x3F,
+                    pixel as u8 & 0x1F,
+                );
+                [r << 1 | r >> 4, g, b << 1 | b >> 4]
+            }
+            (false, 3) => [b0 >> 2, b1 >> 2, b2 >> 2],
+            _ => return,
+        };
+        self.pixel_byte_count = 0;
+        self.write_pixel(pixel);
+    }
+
+    /// Stores a pixel at the write pointer and advances the pointer.
+    fn write_pixel(&mut self, pixel: [u8; 3]) {
         let (column, page) = self.pointer;
         if let Some(index) = self.memory_index(column, page) {
             self.gram[index] = pixel;
         }
+        self.advance_pointer();
+    }
 
+    /// Advances the pointer row by row within the window, wrapping at its end.
+    fn advance_pointer(&mut self) {
+        let (column, page) = self.pointer;
         self.pointer = if column < self.columns.1 {
             (column + 1, page)
         } else if page < self.pages.1 {
@@ -313,10 +524,20 @@ impl Ili9341Model {
 impl SpiTarget for Ili9341Model {
     fn select(&mut self) {}
 
+    /// Ends a read in progress.
+    fn deselect(&mut self) {
+        self.read = None;
+    }
+
     fn transfer(&mut self, mosi: u8) -> u8 {
-        if self.mode == InterfaceMode::Spi {
-            self.receive(mosi.into(), self.dc);
+        if self.mode != InterfaceMode::Spi {
+            return 0;
         }
+        // The chip ignores SDI while it shifts out a response.
+        if self.read.is_some() {
+            return self.read_byte();
+        }
+        self.receive(mosi.into(), self.dc);
         0
     }
 }
@@ -334,8 +555,12 @@ mod tests {
     use super::*;
     use std::boxed::Box;
 
+    /// A model in 16-bit color.
     fn ready(mode: InterfaceMode) -> Box<Ili9341Model> {
-        Box::new(Ili9341Model::new(mode))
+        let mut model = Box::new(Ili9341Model::new(mode));
+        model.receive(Command::COLMOD.code().into(), false);
+        model.receive(0x55, true);
+        model
     }
 
     #[test]
