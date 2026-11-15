@@ -41,7 +41,7 @@ let mut display = Ili9341::new(ParallelInterface::new(bus, dc, wr));
 ## Implemented so far
 
 - 4-wire SPI, 8-bit and 16-bit 8080-I parallel interfaces
-- Initialization, hardware reset, sleep and display on/off with datasheet timing
+- Initialization with the Adafruit_ILI9341 power and gamma settings, hardware reset, sleep and display on/off with datasheet timing
 - Four orientations, RGB/BGR color order, color inversion
 - Area writes from pixel iterators, rectangle and screen fills, bounds checks
 - `embedded-graphics` `DrawTarget` with clipping (blocking driver)

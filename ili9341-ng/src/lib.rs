@@ -72,6 +72,58 @@ pub const SLEEP_OUT_DELAY_MS: u32 = 120;
 /// Waiting the full 120 ms lets a wake follow at any time.
 pub const SLEEP_IN_DELAY_MS: u32 = 120;
 
+/// Power, VCOM, frame rate and gamma settings sent by [`Ili9341::init`] after the
+/// software reset.
+///
+/// The values come from the `begin()` sequence of [Adafruit_ILI9341], present since its
+/// oldest file history ([`a82528f`], 2014-01-02) without a note on their origin.
+/// [TFT_eSPI] copied them; its maintainer wrote: "The init sequence was pulled from the
+/// Adafruit ILI9341 library a few years ago. [...] You may find you can delete those lines
+/// and it will not make a difference!" ([Arduino forum, 2018][forum]).
+///
+/// [Adafruit_ILI9341]: https://github.com/adafruit/Adafruit_ILI9341
+/// [`a82528f`]: https://github.com/adafruit/Adafruit_ILI9341/blob/a82528fb6a5c6ba39b3bc411123df68ab5cdce0d/Adafruit_ILI9341.cpp
+/// [TFT_eSPI]: https://github.com/Bodmer/TFT_eSPI/blob/master/TFT_Drivers/ILI9341_Init.h
+/// [forum]: https://forum.arduino.cc/t/bodmer-ili9341-master-library-vs-datasheet/518777
+const PANEL_INIT: &[(u8, &[u8])] = &[
+    // Undocumented: not in the datasheet, effect unknown. An Adafruit forum thread
+    // reportedly attributes it to Ilitek and the panel maker (unverified, page not
+    // readable): https://forums.adafruit.com/viewtopic.php?f=47&t=63229
+    (0xEF, &[0x03, 0x80, 0x02]),
+    (Command::PWCTRLB.code(), &[0x00, 0xC1, 0x30]),
+    (Command::PWRONSEQ.code(), &[0x64, 0x03, 0x12, 0x81]),
+    (Command::DTCTRLA.code(), &[0x85, 0x00, 0x78]),
+    (Command::PWCTRLA.code(), &[0x39, 0x2C, 0x00, 0x34, 0x02]),
+    (Command::PUMPRATIO.code(), &[0x20]),
+    (Command::DTCTRLB.code(), &[0x00, 0x00]),
+    // GVDD = 4.60 V.
+    (Command::PWCTRL1.code(), &[0x23]),
+    (Command::PWCTRL2.code(), &[0x10]),
+    // VCOMH = 4.250 V, VCOML = -1.500 V.
+    (Command::VMCTRL1.code(), &[0x3E, 0x28]),
+    (Command::VMCTRL2.code(), &[0x86]),
+    // 79 Hz frame rate.
+    (Command::FRMCTR1.code(), &[0x00, 0x18]),
+    (Command::DISCTRL.code(), &[0x08, 0x82, 0x27]),
+    // 3-gamma off, gamma curve 1.
+    (Command::ENABLE_3G.code(), &[0x00]),
+    (Command::GAMSET.code(), &[0x01]),
+    (
+        Command::PGAMCTRL.code(),
+        &[
+            0x0F, 0x31, 0x2B, 0x0C, 0x0E, 0x08, 0x4E, 0xF1, 0x37, 0x07, 0x10, 0x03, 0x0E, 0x09,
+            0x00,
+        ],
+    ),
+    (
+        Command::NGAMCTRL.code(),
+        &[
+            0x00, 0x0E, 0x14, 0x03, 0x11, 0x07, 0x31, 0xC1, 0x48, 0x08, 0x0F, 0x0C, 0x31, 0x36,
+            0x0F,
+        ],
+    ),
+];
+
 /// A driver error.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

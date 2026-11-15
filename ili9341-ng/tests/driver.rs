@@ -3,8 +3,8 @@
 use core::cell::RefCell;
 use fake_bus::FakeDelay;
 use ili9341_ng::{
-    ColorOrder, Error, GpioBus, HEIGHT, Ili9341, Interface, Orientation, ParallelInterface,
-    SpiInterface, WIDTH,
+    ColorOrder, Command, Error, GpioBus, HEIGHT, Ili9341, Interface, Orientation,
+    ParallelInterface, SpiInterface, WIDTH,
 };
 use ili9341_sim::{FakeSpi, Ili9341Model, InterfaceMode, Line, SimPin};
 
@@ -34,6 +34,11 @@ fn init_configures_controller() {
     let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
     let display = init(&model, spi(&model));
     assert_eq!(model.borrow().madctl().into_bits(), 0x48); // MX | BGR
+    let m = model.borrow();
+    assert_eq!(m.parameters(Command::PWCTRL1.code()), [0x23]);
+    assert_eq!(m.parameters(Command::VMCTRL1.code()), [0x3E, 0x28]);
+    assert_eq!(m.parameters(Command::PGAMCTRL.code()).len(), 15);
+    assert_eq!(m.parameters(Command::NGAMCTRL.code())[14], 0x0F);
     assert_eq!(display.dimensions(), (WIDTH, HEIGHT));
 }
 

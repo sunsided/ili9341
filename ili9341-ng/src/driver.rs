@@ -95,8 +95,9 @@ macro_rules! driver {
         where
             DI: $interface,
         {
-            /// Initializes the controller: software reset, 16-bit color, the stored
-            /// orientation and color order, sleep out and display on.
+            /// Initializes the controller: software reset, the Adafruit power, VCOM, frame
+            /// rate and gamma settings, 16-bit color, the stored orientation and color
+            /// order, sleep out and display on.
             ///
             /// Takes about 240 ms. The frame memory content is undefined afterwards.
             pub $($asy)* fn init<D>(&mut self, delay: &mut D) -> Result<(), $crate::Error<DI::Error>>
@@ -107,6 +108,12 @@ macro_rules! driver {
 
                 self.send_command(Command::SWRESET, &[]) $($aw)* ?;
                 delay.delay_ms($crate::RESET_DELAY_MS) $($aw)*;
+                for &(command, parameters) in $crate::PANEL_INIT {
+                    self.interface
+                        .send_command(command, parameters)
+                        $($aw)*
+                        .map_err($crate::Error::Interface)?;
+                }
                 self.send_command(Command::COLMOD, &[$crate::registers::PixelFormat::rgb565().into_bits()]) $($aw)* ?;
                 self.send_command(Command::MADCTL, &[self.madctl.into_bits()]) $($aw)* ?;
                 self.send_command(Command::SLPOUT, &[]) $($aw)* ?;
