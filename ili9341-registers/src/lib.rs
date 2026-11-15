@@ -10,7 +10,6 @@
 //! Command codes and bit layouts follow the ILI9341 datasheet (V1.11).
 
 #![deny(missing_docs)]
-#![deny(warnings)]
 #![no_std]
 #![forbid(unsafe_code)]
 // bitfield-struct generates `with_*_checked` setters that return `Result<_, ()>`.
