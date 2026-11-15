@@ -28,19 +28,30 @@ jobs:
         with:
           persist-credentials: false
       - name: Package crates
+        run: cargo package -p ili9341-registers -p ili9341-ng
+      - name: Build Wokwi chip
         run: |
-          cargo package -p ili9341-registers -p ili9341-ng
-          mkdir -p dist
+          rustup target add wasm32-unknown-unknown
+          sim/wokwi-chip/build.sh
+          # Wokwi's `github:` chip dependencies expect a chip.zip with chip.json and chip.wasm.
+          mkdir -p dist/chip
+          cp sim/wokwi-chip/ili9341.chip.json dist/chip/chip.json
+          cp sim/wokwi-chip/ili9341.chip.wasm dist/chip/chip.wasm
+          (cd dist/chip && zip -9 ../chip.zip chip.json chip.wasm)
           cp target/package/*.crate dist/
           ls -l dist
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.crate
+          subject-path: |
+            dist/chip.zip
+            dist/*.crate
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets
-          path: dist/*.crate
+          path: |
+            dist/chip.zip
+            dist/*.crate
           if-no-files-found: error
 
   publish:
