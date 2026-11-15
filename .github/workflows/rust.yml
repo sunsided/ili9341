@@ -101,6 +101,45 @@ jobs:
           # shellcheck disable=SC2086 # FEATURES is empty or a single flag.
           cargo test --workspace --tests --verbose $FEATURES
 
+  msrv:
+    name: Minimum supported Rust version
+    needs:
+      - lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the MSRV toolchain
+        run: |
+          msrv=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "ili9341-ng") | .rust_version')
+          rustup toolchain install "$msrv" --profile minimal
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+      - name: Test on the MSRV
+        run: cargo "+$MSRV" test --workspace --all-features
+
+  no-std:
+    name: Build for bare metal
+    needs:
+      - lint
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: [ "--all-features", "--no-default-features" ]
+    env:
+      FEATURES: ${{ matrix.features }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install target
+        run: rustup target add thumbv7em-none-eabihf
+      - name: Build the published crates
+        run: |
+          # shellcheck disable=SC2086 # FEATURES is a single flag.
+          cargo build -p ili9341-registers -p ili9341-ng --target thumbv7em-none-eabihf $FEATURES
+
   wokwi:
     name: Wokwi simulation (ESP32-C3)
     needs:

@@ -39,8 +39,9 @@ wokwi.com, and reading its display ID back.
 ## Development
 
 The [Taskfile](Taskfile.dist.yaml) wraps the common commands: `task check` and
-`task test` run what CI runs, `task sim` builds the ESP32-C3 firmware and runs its
-scenarios. `task` lists everything.
+`task test` run what CI runs, `task msrv` and `task no-std` its MSRV and bare-metal
+builds, `task sim` builds the ESP32-C3 firmware and runs its scenarios. `task` lists
+everything.
 
 ## Releasing
 
@@ -51,6 +52,9 @@ Both published crates share one version. From `main`, with the changes listed un
 cargo release <patch|minor|major>            # dry run
 cargo release <patch|minor|major> --execute
 ```
+
+Run `task semver` first: it checks the API changes against the last release on
+crates.io, and the release workflow fails on a version bump too small for them.
 
 This commits `Release X.Y.Z` and pushes the tag `vX.Y.Z`. The tag runs the release workflow,
 which publishes `ili9341-registers` and `ili9341-ng` to crates.io via

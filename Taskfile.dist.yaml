@@ -133,6 +133,32 @@ tasks:
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --diagram-file diagram-chip.json --elf target/riscv32imc-unknown-none-elf/release/readback --scenario scenarios/readback.yaml --timeout 10000
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --elf target/riscv32imc-unknown-none-elf/release/async --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot-async.png
 
+  msrv:
+    desc: Run the tests on the minimum supported Rust version
+    preconditions: *cargo
+    vars:
+      MSRV:
+        sh: cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ili9341-ng") | .rust_version'
+    cmds:
+      - cargo +{{.MSRV}} test --workspace --all-features {{.CLI_ARGS}}
+
+  no-std:
+    desc: Build the published crates for a bare-metal target (thumbv7em-none-eabihf)
+    preconditions:
+      - sh: rustup target list --installed | grep -q thumbv7em-none-eabihf
+        msg: "target missing — rustup target add thumbv7em-none-eabihf"
+    cmds:
+      - cargo build -p ili9341-registers -p ili9341-ng --target thumbv7em-none-eabihf --all-features
+      - cargo build -p ili9341-registers -p ili9341-ng --target thumbv7em-none-eabihf --no-default-features
+
+  semver:
+    desc: Check the published crates for breaking changes against crates.io (release CI runs this too)
+    preconditions:
+      - sh: command -v cargo-semver-checks
+        msg: "cargo-semver-checks not found — cargo install cargo-semver-checks --locked"
+    cmds:
+      - cargo semver-checks -p ili9341-registers -p ili9341-ng
+
   release:dry:
     desc: Preview a release without changing anything (LEVEL=patch|minor|major)
     vars:
