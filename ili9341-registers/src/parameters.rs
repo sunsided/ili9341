@@ -60,6 +60,27 @@ impl PixelFormat {
     }
 }
 
+/// Response of [`RDDPM`](crate::Command::RDDPM) (0Ah): the display power mode. Default
+/// after reset: `0x08`.
+#[bitfield(u8, order = Msb, defmt = cfg(feature = "defmt"))]
+#[derive(PartialEq, Eq)]
+pub struct PowerMode {
+    /// `D7`: the booster is on and working.
+    pub booster_on: bool,
+    /// `D6`: idle mode (8 colors) is on.
+    pub idle_mode: bool,
+    /// `D5`: partial mode is on.
+    pub partial_mode: bool,
+    /// `D4`: the controller is out of sleep mode.
+    pub sleep_out: bool,
+    /// `D3`: normal display mode is on.
+    pub normal_mode: bool,
+    /// `D2`: the display output is on.
+    pub display_on: bool,
+    #[bits(2)]
+    __: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +99,13 @@ mod tests {
     fn pixel_format_bits() {
         assert_eq!(PixelFormat::rgb565().into_bits(), 0x55);
         assert_eq!(PixelFormat::from_bits(0x66).dbi(), PixelFormat::BPP_18);
+    }
+
+    #[test]
+    fn power_mode_bits() {
+        let mode = PowerMode::from_bits(0x9C);
+        assert!(mode.booster_on() && mode.sleep_out() && mode.normal_mode() && mode.display_on());
+        assert!(!mode.idle_mode() && !mode.partial_mode());
     }
 
     #[test]

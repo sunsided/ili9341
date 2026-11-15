@@ -24,6 +24,12 @@ pub enum Command {
     RDDMADCTL = 0x0B,
     /// Read display pixel format (0Ch).
     RDDCOLMOD = 0x0C,
+    /// Read display image mode (0Dh).
+    RDDIM = 0x0D,
+    /// Read display signal mode (0Eh).
+    RDDSM = 0x0E,
+    /// Read display self-diagnostic result (0Fh).
+    RDDSDR = 0x0F,
     /// Enter sleep mode (10h). Wait 5 ms before the next command.
     SLPIN = 0x10,
     /// Sleep out (11h). Wait 5 ms before the next command, and 120 ms before `SLPIN`.

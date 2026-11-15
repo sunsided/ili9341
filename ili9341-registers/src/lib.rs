@@ -5,7 +5,7 @@
 //! The ILI9341 has no addressable register file: the host sends a command byte with the
 //! `D/CX` line low, followed by its parameter bytes with `D/CX` high. [`Command`] lists the
 //! command codes; the parameter types in this crate encode the bit layouts of the
-//! parameters that carry flags.
+//! parameters and responses that carry flags.
 //!
 //! Command codes and bit layouts follow the ILI9341 datasheet (V1.11).
 
