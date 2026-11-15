@@ -1,0 +1,6 @@
+name: Initialize and draw
+version: 1
+author: Markus Mayer
+
+steps:
+  - wait-serial: 'ILI9341 ok 320x240'

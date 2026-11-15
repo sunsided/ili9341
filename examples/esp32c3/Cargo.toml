@@ -1,0 +1,30 @@
+[package]
+name = "ili9341-example-esp32c3"
+description = "Draws on an ILI9341 over SPI from an ESP32-C3"
+version = "0.1.0"
+license = "EUPL-1.2 OR MIT OR Apache-2.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+embedded-graphics = "0.8.2"
+embedded-hal = "1.0.0"
+embedded-hal-bus = "0.3.0"
+esp-backtrace = { version = "0.20.0", features = ["esp32c3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c3"] }
+esp-hal = { version = "1.2.2", features = ["esp32c3", "unstable"] }
+esp-println = { version = "0.18.0", features = ["esp32c3"] }
+ili9341-ng = { path = "../../ili9341-ng", features = ["embedded-graphics"] }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+opt-level = "s"
+debug = 2
+lto = "fat"
+codegen-units = 1
+
+[lints.clippy]
+# Modules live in `name.rs` plus `name/`, never in `name/mod.rs`.
+mod_module_files = "deny"
