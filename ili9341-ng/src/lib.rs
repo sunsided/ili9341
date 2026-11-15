@@ -37,7 +37,8 @@
 //!
 //! The controller refreshes the panel at about 70 Hz from the frame memory. To update
 //! without tearing, enable its `TE` output with [`Ili9341::set_tearing_effect`], wait for
-//! the pulse on a GPIO, then write. See [`TearingEffect`].
+//! the pulse on a GPIO with [`wait_for_tear`], then write. Without a `TE` line,
+//! [`Ili9341::read_scanline`] tells where the refresh is.
 //!
 //! ## Scrolling and partial mode
 //!
@@ -246,7 +247,8 @@ fn pixel_bytes<P: PixelData>(
 pub enum Error<E> {
     /// The interface failed.
     Interface(E),
-    /// The area, line or scroll region does not lie within the screen.
+    /// The area, line or scroll region does not lie within the screen, or a setting is
+    /// out of its range.
     OutOfBounds,
     /// The buffer length does not match the area.
     BufferLength,
@@ -326,6 +328,18 @@ pub enum TearingEffect {
     VBlank,
     /// Vertical and horizontal blanking: one pulse per frame and per line.
     VAndHBlank,
+}
+
+/// Waits for the rising edge of the tearing effect output `TE`: the start of vertical
+/// blanking, when writing the frame memory does not tear.
+///
+/// Polls `te`; with the `async` feature,
+/// [`asynch::wait_for_tear`] waits for the edge instead.
+/// Enable `TE` first with [`Ili9341::set_tearing_effect`].
+pub fn wait_for_tear<P: embedded_hal::digital::InputPin>(te: &mut P) -> Result<(), P::Error> {
+    while te.is_high()? {}
+    while te.is_low()? {}
+    Ok(())
 }
 
 interface!(

@@ -52,10 +52,12 @@ let mut display = Ili9341::new(ParallelInterface::new(bus, dc, wr));
   for DMA and framebuffers); rectangle and screen fills from a prepared buffer; bounds
   checks
 - Vertical scrolling with fixed top and bottom areas, partial mode, idle mode
-- Tearing effect output (`TE`) and its scanline
+- Tearing effect output (`TE`) and its scanline, `wait_for_tear` on a GPIO, and the
+  current scanline (`read_scanline`) for hosts without a `TE` line
+- Frame rate (`set_frame_rate`, 61–119 Hz and divided down)
 - Reading over SPI (needs `SDO` and at most 6.6 MHz) and the parallel bus (needs `RDX`
-  and a `ReadBus`): power mode, `MADCTL`, pixel format, self-diagnostic, display ID,
-  and pixels from the frame memory
+  and a `ReadBus`): power mode, `MADCTL`, pixel format, image and signal mode,
+  self-diagnostic, display status and ID, and pixels from the frame memory
 - `embedded-graphics` `DrawTarget`s for `Rgb565` and `Rgb666`, with clipping (blocking
   driver)
 - Your own panel power and gamma settings via `init_with`

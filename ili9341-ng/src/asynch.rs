@@ -41,6 +41,16 @@
 //! }
 //! ```
 
+/// Waits for the rising edge of the tearing effect output `TE`: the start of vertical
+/// blanking, when writing the frame memory does not tear.
+///
+/// Enable `TE` first with [`Ili9341::set_tearing_effect`].
+pub async fn wait_for_tear<P: embedded_hal_async::digital::Wait>(
+    te: &mut P,
+) -> Result<(), P::Error> {
+    te.wait_for_rising_edge().await
+}
+
 interface!(
     doc = "The bus between the host and the controller, async.",
     spi = embedded_hal_async::spi::SpiDevice,

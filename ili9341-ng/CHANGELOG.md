@@ -22,9 +22,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   type parameter (default `()`), and the new `ReadBus` trait switches the data lines to
   inputs and samples them.
 - `ColorDepth::bytes_per_pixel`.
+- `wait_for_tear` (blocking, polling) and `asynch::wait_for_tear` (on
+  `embedded_hal_async::digital::Wait`) wait for the rising edge of `TE`.
+- Reads of the display status (`read_display_status`), image mode (`read_image_mode`),
+  signal mode (`read_signal_mode`), scanline (`read_scanline`) and the three ID bytes
+  (`read_ids`). Over SPI, `GET_SCANLINE` is assumed to start with a dummy clock like the
+  other multi-byte reads.
+- `set_frame_rate` sets the division ratio and clocks per line of `FRMCTR1`.
 
 ### Changed
 
+- `Error::OutOfBounds` also reports settings out of their range.
 - [**breaking**] `ReadInterface::read` drops its `dummy_byte` parameter: the interface
   now handles the dummy cycles of each command, which differ between SPI and the
   parallel bus. `SpiInterface` also drops the dummy bit of 24- and 32-bit reads.

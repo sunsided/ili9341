@@ -14,10 +14,14 @@
 //! of the datasheet: commands sent too early after a reset or sleep transition are
 //! ignored and counted, as the real chip ignores them.
 //!
-//! It answers the read commands `RDDIDIF`, `RDDPM`, `RDDMADCTL`, `RDDCOLMOD`, `RDDSDR`
-//! and `RAMRD` with the datasheet's dummy cycles: over SPI, and on the parallel bus
-//! through `RDX` ([`Line::Rd`], [`Ili9341Model::data_out`]). It tracks idle mode and the
-//! tearing effect setting, but does not drive `TE`.
+//! It answers the read commands `RDDIDIF`, `RDDST`, `RDDPM`, `RDDMADCTL`, `RDDCOLMOD`,
+//! `RDDIM`, `RDDSM`, `RDDSDR`, `RDID1`–`RDID3`, `GET_SCANLINE` and `RAMRD` with the
+//! datasheet's dummy cycles: over SPI, and on the parallel bus through `RDX`
+//! ([`Line::Rd`], [`Ili9341Model::data_out`]).
+//!
+//! The panel refresh runs on the model's clock at the frame rate set by `FRMCTR1`
+//! ([`Ili9341Model::scanline`]), and drives `TE` ([`Line::Te`],
+//! [`Ili9341Model::te_level`]).
 //!
 //! ## Assumptions
 //!
@@ -35,6 +39,14 @@
 //!   driver's `MADCTL` values, the four orientations then look the same on both parts.
 //! - Areas the panel does not show (display off, sleep, outside the partial area) are
 //!   black.
+//! - A frame is 320 display lines followed by 4 blanking lines (the `PRCTR` defaults,
+//!   2 front and 2 back porch lines), each `RTNA << DIVA` cycles of a 615 kHz oscillator
+//!   (`FRMCTR1`). Scanlines count from the first display line, `0..324`.
+//! - `TE` is high during the blanking lines while the tearing effect is on and the
+//!   controller is out of sleep, in both `TEON` modes: the horizontal pulses of mode 1
+//!   and the tear scanline (`STE`) are not modeled.
+//! - Over SPI, reads of more than one byte (`RDDIDIF`, `RDDST`, `GET_SCANLINE`) start
+//!   with a dummy clock; the datasheet shows this for the 24- and 32-bit reads.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -42,7 +54,7 @@
 
 mod pins;
 
-pub use pins::{Line, SimPin};
+pub use pins::{Line, SimPin, TE_POLL_NS};
 
 use fake_bus::{Clock, SpiTarget};
 use ili9341_registers::{Command, HEIGHT, MemoryAccessControl, PixelFormat, PowerMode, WIDTH};
@@ -73,6 +85,12 @@ const BUSY_NS: u64 = 5_000_000;
 /// nanoseconds.
 const SLEEP_TOGGLE_NS: u64 = 120_000_000;
 
+/// The internal oscillator frequency, in Hz.
+const OSCILLATOR_HZ: u64 = 615_000;
+
+/// The blanking lines per frame: front and back porch.
+const BLANKING_LINES: u16 = 4;
+
 /// The most parameters any command takes (`PGAMCTRL`, `NGAMCTRL`).
 const MAX_PARAMETERS: usize = 15;
 
@@ -82,7 +100,7 @@ const PIXELS: usize = WIDTH as usize * HEIGHT as usize;
 #[derive(Debug, Copy, Clone)]
 enum Read {
     /// A fixed response, sent byte by byte.
-    Bytes { data: [u8; 5], len: u8, pos: u8 },
+    Bytes { data: [u8; 6], len: u8, pos: u8 },
     /// `RAMRD`: one dummy byte, then three bytes per pixel from the write pointer on.
     Memory {
         dummy: bool,
@@ -127,6 +145,10 @@ pub struct Ili9341Model {
     inverted: bool,
     idle: bool,
     tearing_effect: bool,
+    /// `FRMCTR1`: the division ratio `DIVA` and the clocks per line `RTNA`.
+    frame_control: (u8, u8),
+    timing_changes: u64,
+    spi_transactions: u64,
     columns: (u16, u16),
     pages: (u16, u16),
     pointer: (u16, u16),
@@ -170,6 +192,9 @@ impl Ili9341Model {
             inverted: false,
             idle: false,
             tearing_effect: false,
+            frame_control: (0, 0x1B),
+            timing_changes: 0,
+            spi_transactions: 0,
             columns: (0, 0),
             pages: (0, 0),
             pointer: (0, 0),
@@ -231,6 +256,51 @@ impl Ili9341Model {
     /// `TEON` hold its mode.
     pub fn is_tearing_effect_on(&self) -> bool {
         self.tearing_effect
+    }
+
+    /// The scanline the panel refresh is at: `0..320` while it shows a line, `320..324`
+    /// during vertical blanking.
+    pub fn scanline(&self) -> u16 {
+        let line = self.now_ns / self.line_ns();
+        (line % u64::from(HEIGHT + BLANKING_LINES)) as u16
+    }
+
+    /// The duration of one scanline, in nanoseconds.
+    pub fn line_ns(&self) -> u64 {
+        let (division, clocks) = self.frame_control;
+        // `RTNA` below 16 clocks is inhibited; the model treats it as 16.
+        (u64::from(clocks.max(16)) << division) * 1_000_000_000 / OSCILLATOR_HZ
+    }
+
+    /// The level of the `TE` output: high during vertical blanking while the tearing
+    /// effect is on and the controller is out of sleep.
+    pub fn te_level(&self) -> bool {
+        self.tearing_effect && !self.sleeping && self.scanline() >= HEIGHT
+    }
+
+    /// How long until the next `TE` edge, in nanoseconds, or `None` while `TE` stays
+    /// low.
+    pub fn next_te_edge_ns(&self) -> Option<u64> {
+        if !self.tearing_effect || self.sleeping {
+            return None;
+        }
+        let line = self.line_ns();
+        let frame = line * u64::from(HEIGHT + BLANKING_LINES);
+        let position = self.now_ns % frame;
+        let blanking = line * u64::from(HEIGHT);
+        let next = if position < blanking { blanking } else { frame };
+        Some(next - position)
+    }
+
+    /// A counter that increases whenever the `TE` timing may change: tearing effect
+    /// on or off, frame rate, sleep and reset.
+    pub fn timing_changes(&self) -> u64 {
+        self.timing_changes
+    }
+
+    /// How many SPI transactions (chip select cycles) the model saw through [`FakeSpi`].
+    pub fn spi_transactions(&self) -> u64 {
+        self.spi_transactions
     }
 
     /// Whether partial mode is on.
@@ -321,6 +391,16 @@ impl Ili9341Model {
         self.data_out
     }
 
+    /// Drives the `RDX` line. On the parallel bus, its falling edge puts the next word of
+    /// the read in progress on [`data_out`](Self::data_out).
+    pub fn set_read_line(&mut self, high: bool) {
+        let falling = !high && self.rd;
+        self.rd = high;
+        if falling && self.mode != InterfaceMode::Spi && !self.in_reset {
+            self.parallel_read();
+        }
+    }
+
     /// Ends an SPI read; chip select deasserting does this.
     pub fn spi_end_read(&mut self) {
         self.read = None;
@@ -349,6 +429,8 @@ impl Ili9341Model {
         self.inverted = false;
         self.idle = false;
         self.tearing_effect = false;
+        self.frame_control = (0, 0x1B);
+        self.timing_changes += 1;
         self.columns = (0, WIDTH - 1);
         self.pages = (0, HEIGHT - 1);
         self.partial_mode = false;
@@ -409,6 +491,7 @@ impl Ili9341Model {
                     return;
                 }
                 self.sleeping = c == Command::SLPIN.code();
+                self.timing_changes += 1;
                 self.start_timing(true);
             }
             c if c == Command::DISPON.code() => self.display_on = true,
@@ -417,9 +500,13 @@ impl Ili9341Model {
             c if c == Command::INVOFF.code() => self.inverted = false,
             c if c == Command::IDMON.code() => self.idle = true,
             c if c == Command::IDMOFF.code() => self.idle = false,
-            c if c == Command::TEOFF.code() => self.tearing_effect = false,
+            c if c == Command::TEOFF.code() => {
+                self.tearing_effect = false;
+                self.timing_changes += 1;
+            }
             c if c == Command::TEON.code() => {
                 self.tearing_effect = true;
+                self.timing_changes += 1;
                 self.command = Some(code);
             }
             c if c == Command::PTLON.code() => (self.partial_mode, self.scrolling) = (true, false),
@@ -436,14 +523,29 @@ impl Ili9341Model {
                     pos: 3,
                 });
             }
-            c if c == Command::RDDIDIF.code() && self.mode == InterfaceMode::Spi => {
-                // One dummy clock, then 24 bits.
-                let [a, b, c] = MODEL_DISPLAY_ID;
-                let bits = u32::from_be_bytes([0, a, b, c]) << 7;
-                let [d0, d1, d2, d3] = bits.to_be_bytes();
-                self.respond(&[d0, d1, d2, d3]);
+            c if c == Command::RDDIDIF.code() => self.respond_wide(&MODEL_DISPLAY_ID),
+            c if c == Command::RDDST.code() => {
+                let status = self.display_status().to_be_bytes();
+                self.respond_wide(&status);
             }
-            c if c == Command::RDDIDIF.code() => self.respond(&MODEL_DISPLAY_ID),
+            c if c == Command::GET_SCANLINE.code() => {
+                let line = self.scanline().to_be_bytes();
+                self.respond_wide(&line);
+            }
+            c if c == Command::RDDIM.code() => {
+                let gamma = self.parameters(Command::GAMSET.code()).first().copied();
+                // GC0 (gamma curve 1) is the reset value; `GAMSET` takes it as bit 0.
+                let curve = gamma.map_or(0, |g| g.trailing_zeros().min(3) as u8);
+                self.respond(&[u8::from(self.inverted) << 5 | curve]);
+            }
+            c if c == Command::RDDSM.code() => {
+                let mode = self.parameters(Command::TEON.code()).first().copied();
+                let line_mode = mode.unwrap_or(0) & 1;
+                self.respond(&[u8::from(self.tearing_effect) << 7 | line_mode << 6]);
+            }
+            c if c == Command::RDID1.code() => self.respond(&MODEL_DISPLAY_ID[..1]),
+            c if c == Command::RDID2.code() => self.respond(&MODEL_DISPLAY_ID[1..2]),
+            c if c == Command::RDID3.code() => self.respond(&MODEL_DISPLAY_ID[2..]),
             c if c == Command::RDDPM.code() => {
                 let mode = PowerMode::new()
                     .with_booster_on(!self.sleeping)
@@ -463,11 +565,50 @@ impl Ili9341Model {
         }
     }
 
+    /// Starts sending a response of more than one byte. Over SPI, a dummy clock precedes
+    /// it; on the parallel bus, a dummy word.
+    fn respond_wide(&mut self, response: &[u8]) {
+        if self.mode != InterfaceMode::Spi {
+            return self.respond(response);
+        }
+        // The dummy bit shifts everything right; the last bit spills into one more byte.
+        let mut data = [0; 5];
+        let mut carry = 0;
+        for (out, &byte) in data.iter_mut().zip(response) {
+            *out = carry | byte >> 1;
+            carry = byte << 7;
+        }
+        data[response.len()] = carry;
+        self.respond(&data[..=response.len()]);
+    }
+
+    /// The display status (`RDDST`), after the datasheet's bit layout: booster, `MADCTL`
+    /// `MY`–`MH`, the interface pixel format, idle, partial, sleep out, normal mode,
+    /// vertical scrolling, inversion, display on, tearing effect on and its mode.
+    fn display_status(&self) -> u32 {
+        let madctl = u32::from(self.madctl.into_bits() >> 2);
+        let format = u32::from(PixelFormat::from_bits(self.colmod).dbi());
+        let mode = self.parameters(Command::TEON.code()).first().copied();
+        let bit = |on: bool, n: u32| u32::from(on) << n;
+        bit(!self.sleeping, 31)
+            | madctl << 25
+            | format << 20
+            | bit(self.idle, 19)
+            | bit(self.partial_mode, 18)
+            | bit(!self.sleeping, 17)
+            | bit(!self.partial_mode, 16)
+            | bit(self.scrolling, 15)
+            | bit(self.inverted, 13)
+            | bit(self.display_on, 10)
+            | bit(self.tearing_effect, 9)
+            | bit(mode.unwrap_or(0) & 1 != 0, 5)
+    }
+
     /// Starts sending a fixed response on the next reads. On the parallel bus, a dummy
     /// word precedes it.
     fn respond(&mut self, response: &[u8]) {
         let dummy = usize::from(self.mode != InterfaceMode::Spi);
-        let mut data = [0; 5];
+        let mut data = [0; 6];
         data[dummy..dummy + response.len()].copy_from_slice(response);
         let len = (dummy + response.len()) as u8;
         self.read = Some(Read::Bytes { data, len, pos: 0 });
@@ -572,6 +713,10 @@ impl Ili9341Model {
             (c, 4) if c == Command::CASET.code() => self.columns = (word_at(0), word_at(2)),
             (c, 4) if c == Command::PASET.code() => self.pages = (word_at(0), word_at(2)),
             (c, 4) if c == Command::PTLAR.code() => self.partial_area = (word_at(0), word_at(2)),
+            (c, 2) if c == Command::FRMCTR1.code() => {
+                self.frame_control = (p[0] & 0x03, p[1] & 0x1F);
+                self.timing_changes += 1;
+            }
             (c, 6) if c == Command::VSCRDEF.code() => {
                 self.scroll_area = (word_at(0), word_at(2), word_at(4))
             }
@@ -647,7 +792,9 @@ impl Ili9341Model {
 }
 
 impl SpiTarget for Ili9341Model {
-    fn select(&mut self) {}
+    fn select(&mut self) {
+        self.spi_transactions += 1;
+    }
 
     fn deselect(&mut self) {
         self.spi_end_read();

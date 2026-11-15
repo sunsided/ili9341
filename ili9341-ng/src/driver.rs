@@ -247,6 +247,24 @@ macro_rules! driver {
                 self.send_command($crate::Command::SET_TEAR_SCANLINE, &line.to_be_bytes()) $($aw)*
             }
 
+            /// Sets the frame rate in normal mode (`FRMCTR1`): `division` (`0..=3`) divides
+            /// the 615 kHz oscillator by `2^division`, and each line takes
+            /// `clocks_per_line` (`16..=31`) of its cycles.
+            ///
+            /// Frame rate = 615 kHz / (2^`division` × `clocks_per_line` × 324 lines); with
+            /// `division` 0, from 119 Hz (16 clocks) to 61 Hz (31). [`init`](Self::init)
+            /// sets 79 Hz (24), the controller resets to 70 Hz (27).
+            pub $($asy)* fn set_frame_rate(
+                &mut self,
+                division: u8,
+                clocks_per_line: u8,
+            ) -> Result<(), $crate::Error<DI::Error>> {
+                if division > 3 || !(16..=31).contains(&clocks_per_line) {
+                    return Err($crate::Error::OutOfBounds);
+                }
+                self.send_command($crate::Command::FRMCTR1, &[division, clocks_per_line]) $($aw)*
+            }
+
             /// Enters sleep mode. The frame memory is kept.
             pub $($asy)* fn sleep<D>(&mut self, delay: &mut D) -> Result<(), $crate::Error<DI::Error>>
             where
@@ -518,6 +536,46 @@ macro_rules! driver {
             /// register values loaded correctly, bit 6 that the display works.
             pub $($asy)* fn read_self_diagnostic(&mut self) -> Result<u8, $crate::Error<DI::Error>> {
                 self.read_u8($crate::Command::RDDSDR) $($aw)*
+            }
+
+            /// Reads the display status (`RDDST`), 32 bits with the datasheet's layout:
+            /// booster, `MADCTL`, pixel format, idle, partial, sleep, normal and scroll
+            /// mode, inversion, display on, and the tearing effect.
+            pub $($asy)* fn read_display_status(&mut self) -> Result<u32, $crate::Error<DI::Error>> {
+                let mut buffer = [0; 4];
+                self.read($crate::Command::RDDST, &mut buffer) $($aw)* ?;
+                Ok(u32::from_be_bytes(buffer))
+            }
+
+            /// Reads the display image mode (`RDDIM`): bit 5 is inversion, bits 2–0 the
+            /// gamma curve.
+            pub $($asy)* fn read_image_mode(&mut self) -> Result<u8, $crate::Error<DI::Error>> {
+                self.read_u8($crate::Command::RDDIM) $($aw)*
+            }
+
+            /// Reads the display signal mode (`RDDSM`): bit 7 is the tearing effect output,
+            /// bit 6 its mode (set for [`VAndHBlank`](crate::TearingEffect::VAndHBlank)).
+            pub $($asy)* fn read_signal_mode(&mut self) -> Result<u8, $crate::Error<DI::Error>> {
+                self.read_u8($crate::Command::RDDSM) $($aw)*
+            }
+
+            /// Reads the scanline the panel refresh is at (`GET_SCANLINE`), to time frame
+            /// memory writes without a `TE` line.
+            pub $($asy)* fn read_scanline(&mut self) -> Result<u16, $crate::Error<DI::Error>> {
+                let mut buffer = [0; 2];
+                self.read($crate::Command::GET_SCANLINE, &mut buffer) $($aw)* ?;
+                Ok(u16::from_be_bytes(buffer) & 0x3FF)
+            }
+
+            /// Reads the manufacturer, version and driver ID with three 8-bit reads
+            /// (`RDID1`–`RDID3`); the same values as
+            /// [`read_display_id`](Self::read_display_id), without its dummy clock.
+            pub $($asy)* fn read_ids(&mut self) -> Result<[u8; 3], $crate::Error<DI::Error>> {
+                Ok([
+                    self.read_u8($crate::Command::RDID1) $($aw)* ?,
+                    self.read_u8($crate::Command::RDID2) $($aw)* ?,
+                    self.read_u8($crate::Command::RDID3) $($aw)* ?,
+                ])
             }
 
             /// Reads the display identification (`RDDIDIF`): manufacturer ID, module or

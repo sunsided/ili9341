@@ -1,7 +1,7 @@
 //! Driver tests against the `ili9341-sim` behavioral model.
 
 use core::cell::RefCell;
-use fake_bus::FakeDelay;
+use fake_bus::{Clock, FakeDelay};
 use ili9341_ng::{ColorDepth, rgb565_to_rgb666, rgb666_to_rgb565};
 use ili9341_ng::{
     ColorOrder, Command, Error, GpioBus, HEIGHT, Ili9341, Interface, Orientation, OutputBus,
@@ -677,6 +677,10 @@ where
     assert!(mode.sleep_out() && mode.display_on());
     assert_eq!(display.read_pixel_format().unwrap().into_bits(), 0x55);
     assert_eq!(display.read_display_id().unwrap(), MODEL_DISPLAY_ID);
+    assert_eq!(display.read_ids().unwrap(), MODEL_DISPLAY_ID);
+    assert_ne!(display.read_display_status().unwrap() & 1 << 17, 0); // sleep out
+    let scanline = model.borrow().scanline();
+    assert_eq!(display.read_scanline().unwrap(), scanline);
 
     // Three pixels: nine bytes, so the 16-bit bus ends on a half-used word.
     display.set_color_depth(ColorDepth::Bits18).unwrap();
@@ -719,4 +723,113 @@ fn reads_over_parallel_16bit() {
     )
     .with_read(SimPin::new(&model, Line::Rd));
     check_parallel_reads(&model, interface);
+}
+
+#[test]
+fn reads_status_modes_and_scanline() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display.set_inverted(true).unwrap();
+    display
+        .set_tearing_effect(Some(TearingEffect::VAndHBlank))
+        .unwrap();
+
+    let status = display.read_display_status().unwrap();
+    // Booster, MADCTL MX | BGR, 16-bit, sleep out, normal mode, inversion, display on,
+    // tearing effect on in mode 1.
+    let expected = 1 << 31 | 0x12 << 25 | 0b101 << 20 | 1 << 17 | 1 << 16 | 1 << 13;
+    assert_eq!(status, expected | 1 << 10 | 1 << 9 | 1 << 5);
+    assert_eq!(display.read_image_mode().unwrap(), 1 << 5);
+    assert_eq!(display.read_signal_mode().unwrap(), 0xC0);
+    assert_eq!(display.read_ids().unwrap(), MODEL_DISPLAY_ID);
+
+    // Into line 100 of the next frame, the same fraction of a line in as now.
+    let line = model.borrow().line_ns();
+    let frame = line * 324;
+    {
+        let mut m = model.borrow_mut();
+        let into_frame = m.scanline() as u64 * line;
+        m.advance_ns(frame - into_frame + 100 * line);
+    }
+    assert_eq!(display.read_scanline().unwrap(), 100);
+}
+
+#[test]
+fn frame_rate_sets_the_line_time() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    // 24 clocks of 615 kHz: 79 Hz.
+    assert_eq!(model.borrow().line_ns(), 39_024);
+
+    display.set_frame_rate(1, 16).unwrap();
+    assert_eq!(model.borrow().parameters(Command::FRMCTR1.code()), [1, 16]);
+    assert_eq!(model.borrow().line_ns(), 52_032);
+    assert_eq!(display.set_frame_rate(4, 16), Err(Error::OutOfBounds));
+    assert_eq!(display.set_frame_rate(0, 15), Err(Error::OutOfBounds));
+    assert_eq!(display.set_frame_rate(0, 32), Err(Error::OutOfBounds));
+}
+
+#[test]
+fn waits_for_vertical_blanking() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    let mut te = SimPin::new(&model, Line::Te);
+    display
+        .set_tearing_effect(Some(TearingEffect::VBlank))
+        .unwrap();
+
+    for _ in 0..2 {
+        ili9341_ng::wait_for_tear(&mut te).unwrap();
+        let m = model.borrow();
+        assert!(m.te_level());
+        assert_eq!(m.scanline(), HEIGHT);
+    }
+    // Without the tearing effect, TE stays low.
+    display.set_tearing_effect(None).unwrap();
+    assert!(!model.borrow().te_level());
+}
+
+#[cfg(feature = "async")]
+#[test]
+fn waits_for_vertical_blanking_async() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    display
+        .set_tearing_effect(Some(TearingEffect::VBlank))
+        .unwrap();
+    let mut te = SimPin::new(&model, Line::Te);
+    embassy_futures::block_on(ili9341_ng::asynch::wait_for_tear(&mut te)).unwrap();
+    assert_eq!(model.borrow().scanline(), HEIGHT);
+}
+
+/// Counts the SPI transactions of `f`.
+fn transactions(model: &RefCell<Ili9341Model>, f: impl FnOnce()) -> u64 {
+    let before = model.borrow().spi_transactions();
+    f();
+    model.borrow().spi_transactions() - before
+}
+
+#[test]
+fn bulk_writes_use_few_transactions() {
+    let model = RefCell::new(Ili9341Model::new(InterfaceMode::Spi));
+    let mut display = init(&model, spi(&model));
+    // CASET and PASET take two each (command, then parameters), RAMWR one.
+    const WINDOW: u64 = 5;
+
+    // 153,600 bytes in 256-byte chunks.
+    let fill = transactions(&model, || display.fill_screen(0xF800).unwrap());
+    assert_eq!(fill, WINDOW + 600);
+    // 18-bit: 85 pixels per chunk.
+    display.set_color_depth(ColorDepth::Bits18).unwrap();
+    let fill = transactions(&model, || display.fill_rect(0, 0, 240, 1, 0).unwrap());
+    assert_eq!(fill, WINDOW + 3);
+
+    // A slice goes out in one write.
+    display.set_color_depth(ColorDepth::Bits16).unwrap();
+    let frame = vec![0x55; usize::from(WIDTH) * usize::from(HEIGHT) * 2];
+    let raw = transactions(&model, || {
+        display.draw_raw(0, 0, WIDTH, HEIGHT, &frame).unwrap()
+    });
+    assert_eq!(raw, WINDOW + 1);
+    assert_eq!(model.borrow().gram(WIDTH - 1, HEIGHT - 1), 0x5555);
 }

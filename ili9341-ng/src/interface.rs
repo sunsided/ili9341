@@ -429,11 +429,14 @@ macro_rules! interface {
                 use embedded_hal::spi::Operation;
                 use $crate::Command;
 
-                // Memory reads start with a dummy byte, 24- and 32-bit reads with a dummy
-                // clock; 8-bit reads have none.
+                // Memory reads start with a dummy byte, reads of more than one byte with
+                // a dummy clock; 8-bit reads have none. The datasheet shows the dummy
+                // clock for the 24- and 32-bit reads; `GET_SCANLINE` is assumed to have it.
                 let dummy_byte = command == Command::RAMRD.code()
                     || command == Command::READ_MEMORY_CONTINUE.code();
-                let dummy_bit = command == Command::RDDIDIF.code() || command == Command::RDDST.code();
+                let dummy_bit = command == Command::RDDIDIF.code()
+                    || command == Command::RDDST.code()
+                    || command == Command::GET_SCANLINE.code();
 
                 // D/CX cannot change within one SPI transaction; the datasheet's read
                 // timing only requires it low for the command byte.
