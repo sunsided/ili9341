@@ -34,17 +34,32 @@ display shows. Both parts show the same picture. CI uploads them as the
 
 ## Read back (`src/bin/readback.rs`)
 
-Writes 18-bit pixels, reads them back with the display ID and power mode, and prints
-`readback ok` if the pixels match. It needs MISO, so it runs against the chip; Wokwi's
-built-in part returns zeros for every read. The SPI clock is 6 MHz, the datasheet's read
-limit.
+Writes 18-bit pixels, reads them back with the display ID, power mode and status, and
+prints `readback ok` if the pixels match. It also enables the tearing effect output,
+times two rising edges of `TE` on GPIO3 with `wait_for_tear`, and prints `te ok` for a
+79 Hz frame. It needs MISO and `TE`, so it runs against the chip; Wokwi's built-in part
+returns zeros for every read and has no `TE`. The SPI clock is 6 MHz, the datasheet's
+read limit.
 
 ```sh
 wokwi-cli . --diagram-file diagram-chip.json --scenario scenarios/readback.yaml \
   --elf target/riscv32imc-unknown-none-elf/release/readback --timeout 10000
 ```
 
-On hardware, wire `SDO` to GPIO2 and run `cargo run --release --bin readback`.
+On hardware, wire `SDO` to GPIO2 and `TE` to GPIO3, and run
+`cargo run --release --bin readback`.
+
+## Parallel read back (`src/bin/parallel.rs`)
+
+Drives the chip over the 8-bit 8080-I bus (`diagram-parallel.json`: D0–D7 on GPIO0–3
+and 6–9, D/C = GPIO4, WR = GPIO5, RD = GPIO10, RST = GPIO18, CS tied low). A `ReadBus`
+on `Flex` pins switches the data lines to inputs for reads. It writes 18-bit pixels,
+reads them back with the display ID, and prints `parallel ok` if they match.
+
+```sh
+wokwi-cli . --diagram-file diagram-parallel.json --scenario scenarios/parallel.yaml \
+  --elf target/riscv32imc-unknown-none-elf/release/parallel --timeout 10000
+```
 
 ## Async with DMA (`src/bin/async.rs`)
 

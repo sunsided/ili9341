@@ -198,6 +198,16 @@ jobs:
           diagram_file: diagram-chip.json
           # Resolved from the repository root, unlike the `path`-relative wokwi.toml.
           elf: examples/esp32c3/target/riscv32imc-unknown-none-elf/release/readback
+      - name: Run parallel read-back scenario (ili9341-sim chip)
+        if: steps.token.outputs.present == 'true'
+        uses: wokwi/wokwi-ci-action@09e807a07e05b6f2498e43e3fb7ffcf38c277af7 # v1.3.0
+        with:
+          token: ${{ secrets.WOKWI_CLI_TOKEN }}
+          path: examples/esp32c3
+          timeout: 10000
+          scenario: scenarios/parallel.yaml
+          diagram_file: diagram-parallel.json
+          elf: examples/esp32c3/target/riscv32imc-unknown-none-elf/release/parallel
       - name: Run async scenario (built-in ILI9341)
         if: steps.token.outputs.present == 'true'
         uses: wokwi/wokwi-ci-action@09e807a07e05b6f2498e43e3fb7ffcf38c277af7 # v1.3.0

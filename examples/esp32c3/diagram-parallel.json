@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "author": "Markus Mayer",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-c3-devkitm-1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "chip-ili9341", "id": "lcd1", "top": -40, "left": 200, "attrs": { "interface": "1" } }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "esp:3V3.1", "lcd1:VCC", "red", [] ],
+    [ "esp:GND.1", "lcd1:GND", "black", [] ],
+    [ "esp:3V3.1", "lcd1:LED", "red", [] ],
+    [ "esp:GND.1", "lcd1:CS", "black", [] ],
+    [ "esp:0", "lcd1:D0", "green", [] ],
+    [ "esp:1", "lcd1:D1", "green", [] ],
+    [ "esp:2", "lcd1:D2", "green", [] ],
+    [ "esp:3", "lcd1:D3", "green", [] ],
+    [ "esp:6", "lcd1:D4", "green", [] ],
+    [ "esp:7", "lcd1:D5", "green", [] ],
+    [ "esp:8", "lcd1:D6", "green", [] ],
+    [ "esp:9", "lcd1:D7", "green", [] ],
+    [ "esp:4", "lcd1:DC", "orange", [] ],
+    [ "esp:5", "lcd1:WR", "blue", [] ],
+    [ "esp:10", "lcd1:RD", "purple", [] ],
+    [ "esp:18", "lcd1:RST", "gray", [] ]
+  ],
+  "dependencies": {}
+}

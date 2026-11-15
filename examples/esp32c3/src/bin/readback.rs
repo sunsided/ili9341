@@ -1,8 +1,11 @@
-//! Writes pixels and reads them back over SPI, together with the controller status.
+//! Writes pixels and reads them back over SPI, together with the controller status, and
+//! times the tearing effect output.
 //!
-//! Needs `SDO` wired to MISO, so it runs against the `ili9341-sim` Wokwi chip
-//! (`diagram-chip.json`); Wokwi's built-in ILI9341 returns zeros for every read.
-//! Wiring: SCK = GPIO6, MOSI = GPIO7, MISO = GPIO2, CS = GPIO10, D/C = GPIO4, RST = GPIO5.
+//! Needs `SDO` wired to MISO and `TE` to a GPIO, so it runs against the `ili9341-sim`
+//! Wokwi chip (`diagram-chip.json`); Wokwi's built-in ILI9341 returns zeros for every
+//! read and has no `TE`.
+//! Wiring: SCK = GPIO6, MOSI = GPIO7, MISO = GPIO2, CS = GPIO10, D/C = GPIO4, RST = GPIO5,
+//! TE = GPIO3.
 
 #![no_std]
 #![no_main]
@@ -10,13 +13,13 @@
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
 use esp_hal::delay::Delay;
-use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig};
 use esp_hal::main;
 use esp_hal::spi::Mode;
 use esp_hal::spi::master::{Config as SpiConfig, Spi};
-use esp_hal::time::Rate;
+use esp_hal::time::{Instant, Rate};
 use esp_println::println;
-use ili9341_ng::{ColorDepth, Ili9341, SpiInterface};
+use ili9341_ng::{ColorDepth, Ili9341, SpiInterface, TearingEffect};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -42,6 +45,7 @@ fn main() -> ! {
     let cs = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
     let mut rst = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+    let mut te = Input::new(peripherals.GPIO3, InputConfig::default());
     let spi = ExclusiveDevice::new(spi, cs, Delay::new()).expect("CS pin");
 
     ili9341_ng::reset(&mut rst, &mut delay).unwrap();
@@ -50,7 +54,25 @@ fn main() -> ! {
 
     let id = display.read_display_id().unwrap();
     let power_mode = display.read_power_mode().unwrap().into_bits();
-    println!("readback id={id:02X?} power_mode={power_mode:02X}");
+    let ids = display.read_ids().unwrap();
+    let status = display.read_display_status().unwrap();
+    println!(
+        "readback id={id:02X?} ids={ids:02X?} power_mode={power_mode:02X} status={status:08X}"
+    );
+
+    // One frame of 324 lines at 79 Hz: 12.6 ms.
+    display
+        .set_tearing_effect(Some(TearingEffect::VBlank))
+        .unwrap();
+    ili9341_ng::wait_for_tear(&mut te).unwrap();
+    let start = Instant::now();
+    ili9341_ng::wait_for_tear(&mut te).unwrap();
+    let period = start.elapsed().as_micros();
+    let scanline = display.read_scanline().unwrap();
+    println!("te period={period}us scanline={scanline}");
+    if (12_000..13_300).contains(&period) && ids == id {
+        println!("te ok");
+    }
 
     display.set_color_depth(ColorDepth::Bits18).unwrap();
     display.draw_pixels_rgb666(10, 20, 3, 1, PIXELS).unwrap();

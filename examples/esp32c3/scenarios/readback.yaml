@@ -3,4 +3,5 @@ version: 1
 author: Markus Mayer
 
 steps:
+  - wait-serial: 'te ok'
   - wait-serial: 'readback ok'

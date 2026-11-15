@@ -17,7 +17,8 @@
     [ "esp:2", "lcd1:MISO", "white", [] ],
     [ "esp:10", "lcd1:CS", "purple", [] ],
     [ "esp:4", "lcd1:DC", "orange", [] ],
-    [ "esp:5", "lcd1:RST", "gray", [] ]
+    [ "esp:5", "lcd1:RST", "gray", [] ],
+    [ "esp:3", "lcd1:TE", "yellow", [] ]
   ],
   "dependencies": {}
 }

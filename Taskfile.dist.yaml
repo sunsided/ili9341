@@ -120,7 +120,7 @@ tasks:
       - cd {{.FIRMWARE_DIR}} && cargo build --release
 
   sim:
-    desc: Run the drawing scenario on the built-in ILI9341 and the chip, the read-back scenario on the chip, and the async example
+    desc: Run the drawing scenario on the built-in ILI9341 and the chip, the SPI and parallel read-back scenarios on the chip, and the async example
     deps: [chip, firmware]
     preconditions:
       - sh: command -v wokwi-cli
@@ -131,6 +131,7 @@ tasks:
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot.png
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --diagram-file diagram-chip.json --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot-chip.png
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --diagram-file diagram-chip.json --elf target/riscv32imc-unknown-none-elf/release/readback --scenario scenarios/readback.yaml --timeout 10000
+      - cd {{.FIRMWARE_DIR}} && wokwi-cli . --diagram-file diagram-parallel.json --elf target/riscv32imc-unknown-none-elf/release/parallel --scenario scenarios/parallel.yaml --timeout 10000
       - cd {{.FIRMWARE_DIR}} && wokwi-cli . --elf target/riscv32imc-unknown-none-elf/release/async --scenario scenarios/draw.yaml --timeout 10000 --screenshot-part lcd1 --screenshot-time 1500 --screenshot-file screenshot-async.png
 
   msrv:

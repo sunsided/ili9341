@@ -1,0 +1,6 @@
+name: Read back over the 8-bit parallel bus (ili9341-sim chip)
+version: 1
+author: Markus Mayer
+
+steps:
+  - wait-serial: 'parallel ok'
