@@ -1,7 +1,8 @@
 //! Wokwi custom chip wrapping the `ili9341-sim` behavioral model.
 //!
-//! Pins: `CS`, `DC`, `SCK`, `MOSI`, `MISO` for 4-wire SPI; `WR`, `DC` and `D0`–`D15` for
-//! the 8080-I parallel bus; `RST` (active low). `VCC`, `GND` and `LED` are not used.
+//! Pins: `CS`, `DC`, `SCK`, `MOSI`, `MISO` for 4-wire SPI; `WR`, `RD`, `DC` and
+//! `D0`–`D15` for the 8080-I parallel bus; `RST` (active low); `TE`, the tearing effect
+//! output. `VCC`, `GND` and `LED` are not used.
 //!
 //! The `interface` attribute selects the bus, like the `IM[3:0]` straps of the real
 //! chip: `0` SPI (default), `1` 8-bit parallel, `2` 16-bit parallel.
@@ -24,6 +25,10 @@ struct Chip {
     cs: PinId,
     dc: PinId,
     data: Vec<PinId>,
+    te: PinId,
+    te_timer: TimerId,
+    /// The model's `timing_changes` that `TE` was last scheduled for.
+    timing_changes: u64,
     spi: SPIDevId,
     /// The byte exchanged by the SPI transfer in progress; the simulator writes the
     /// received byte into it and shifts out what it held.
@@ -72,10 +77,45 @@ impl Chip {
     /// Passes a word to the model and reports newly ignored commands.
     fn receive(&mut self, word: u16, dc: bool) {
         self.model.receive(word, dc);
+        if self.model.timing_changes() != self.timing_changes {
+            self.update_te();
+        }
         let ignored = self.model.ignored_commands();
         if ignored != self.ignored_commands {
             self.ignored_commands = ignored;
             debug("ili9341: command ignored, sent too early after a reset or sleep change");
+        }
+    }
+
+    /// Drives `TE` from the model and schedules its next edge.
+    fn update_te(&mut self) {
+        self.timing_changes = self.model.timing_changes();
+        // SAFETY: The pin and timer IDs were obtained in `chipInit`; neither call invokes
+        // a chip callback.
+        unsafe {
+            pinWrite(self.te, u32::from(self.model.te_level()));
+            timerStop(self.te_timer);
+            if let Some(ns) = self.model.next_te_edge_ns() {
+                timerStartNanos(self.te_timer, ns as f64, false);
+            }
+        }
+    }
+
+    /// Drives the data lines with the word the model reads out while `RDX` is low, and
+    /// releases them when it rises.
+    fn read_strobe(&mut self, high: bool) {
+        self.model.set_read_line(high);
+        let word = self.model.data_out();
+        for (n, &pin) in self.data.iter().enumerate() {
+            // SAFETY: Pin IDs were obtained in `chipInit`.
+            unsafe {
+                if high {
+                    pinMode(pin, INPUT);
+                } else {
+                    pinMode(pin, OUTPUT);
+                    pinWrite(pin, u32::from(word >> n & 1));
+                }
+            }
         }
     }
 
@@ -169,10 +209,25 @@ extern "C" fn on_write_strobe(_: *mut c_void, _pin: PinId, _value: u32) {
     });
 }
 
+extern "C" fn on_read_strobe(_: *mut c_void, _pin: PinId, value: u32) {
+    with_chip(|chip| {
+        chip.sync_time();
+        chip.read_strobe(value == HIGH);
+    });
+}
+
 extern "C" fn on_reset_change(_: *mut c_void, _pin: PinId, value: u32) {
     with_chip(|chip| {
         chip.sync_time();
         chip.model.set_reset_line(value == HIGH);
+        chip.update_te();
+    });
+}
+
+extern "C" fn on_te_timer(_: *mut c_void) {
+    with_chip(|chip| {
+        chip.sync_time();
+        chip.update_te();
     });
 }
 
@@ -197,6 +252,12 @@ pub extern "C" fn chipInit() {
         let dc = pinInit(cstr("DC").as_ptr(), INPUT);
         let rst = pinInit(cstr("RST").as_ptr(), INPUT_PULLUP);
         let wr = pinInit(cstr("WR").as_ptr(), INPUT_PULLUP);
+        let rd = pinInit(cstr("RD").as_ptr(), INPUT_PULLUP);
+        let te = pinInit(cstr("TE").as_ptr(), OUTPUT_LOW);
+        let te_timer = timerInit(&TimerConfig {
+            user_data: std::ptr::null(),
+            callback: on_te_timer,
+        });
         let sck = pinInit(cstr("SCK").as_ptr(), INPUT);
         let mosi = pinInit(cstr("MOSI").as_ptr(), INPUT);
         let miso = pinInit(cstr("MISO").as_ptr(), INPUT);
@@ -227,6 +288,9 @@ pub extern "C" fn chipInit() {
             cs,
             dc,
             data,
+            te,
+            te_timer,
+            timing_changes: 0,
             spi,
             spi_buffer: Box::new([0]),
             framebuffer,
@@ -252,7 +316,10 @@ pub extern "C" fn chipInit() {
         watch(rst, BOTH, on_reset_change);
         match mode {
             InterfaceMode::Spi => watch(cs, BOTH, on_cs_change),
-            _ => watch(wr, RISING, on_write_strobe),
+            _ => {
+                watch(wr, RISING, on_write_strobe);
+                watch(rd, BOTH, on_read_strobe);
+            }
         }
 
         let refresh = timerInit(&TimerConfig {

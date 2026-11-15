@@ -37,6 +37,8 @@ The version is given without the `v` prefix of the release tag; `@v0.2.0` fails 
 | `SCK`, `MOSI`     | SPI clock and data in                                 |
 | `MISO`            | SPI data out, for reads                               |
 | `WR`              | Parallel write strobe; data latched on the rising edge |
+| `RD`              | Parallel read strobe; the chip drives `D0`–`D15` while it is low |
+| `TE`              | Tearing effect output: high during vertical blanking while enabled |
 | `D0`–`D15`        | Parallel data lines (`D0`–`D7` on the 8-bit bus)      |
 | `RST`             | Reset input, active low                               |
 | `VCC`, `GND`, `LED` | Not used                                            |
@@ -44,7 +46,8 @@ The version is given without the `v` prefix of the release tag; `@v0.2.0` fails 
 The `interface` attribute selects the bus like the real chip's `IM[3:0]` straps: `"0"`
 SPI (default), `"1"` 8-bit parallel, `"2"` 16-bit parallel.
 
-Unlike Wokwi's built-in `wokwi-ili9341` part, the chip answers SPI reads, supports the
-parallel buses, 18-bit color, scrolling and partial mode, and reports commands sent too
+Unlike Wokwi's built-in `wokwi-ili9341` part, the chip answers reads over SPI and the
+parallel bus, supports the parallel buses, 18-bit color, scrolling, partial and idle
+mode, drives `TE` at the frame rate set by `FRMCTR1`, and reports commands sent too
 early after a reset or sleep change on the debug console. It follows the model's reading
 of the datasheet; see the [`ili9341-sim`](../../ili9341-sim/src/lib.rs) assumptions.
