@@ -45,6 +45,9 @@ const BUSY_NS: u64 = 5_000_000;
 /// nanoseconds.
 const SLEEP_TOGGLE_NS: u64 = 120_000_000;
 
+/// The most parameters any command takes (`PGAMCTRL`, `NGAMCTRL`).
+const MAX_PARAMETERS: usize = 15;
+
 const PIXELS: usize = WIDTH as usize * HEIGHT as usize;
 
 /// The behavioral model of an ILI9341.
@@ -65,8 +68,9 @@ pub struct Ili9341Model {
 
     // Command decoding.
     command: Option<u8>,
-    parameters: [u8; 4],
+    parameters: [u8; MAX_PARAMETERS],
     parameter_count: usize,
+    last_parameters: [([u8; MAX_PARAMETERS], u8); 256],
     pixel_high_byte: Option<u8>,
 
     // Controller state.
@@ -96,8 +100,9 @@ impl Ili9341Model {
             in_reset: false,
             data: 0,
             command: None,
-            parameters: [0; 4],
+            parameters: [0; MAX_PARAMETERS],
             parameter_count: 0,
+            last_parameters: [([0; MAX_PARAMETERS], 0); 256],
             pixel_high_byte: None,
             madctl: MemoryAccessControl::new(),
             colmod: 0,
@@ -147,6 +152,13 @@ impl Ili9341Model {
     /// Whether display inversion is on.
     pub fn is_inverted(&self) -> bool {
         self.inverted
+    }
+
+    /// The parameters last sent with a command, also for commands the model does not
+    /// otherwise implement. Pixel data is not recorded.
+    pub fn parameters(&self, command: u8) -> &[u8] {
+        let (parameters, count) = &self.last_parameters[usize::from(command)];
+        &parameters[..usize::from(*count)]
     }
 
     /// How many commands were ignored because they came too early after a reset or a
@@ -248,6 +260,8 @@ impl Ili9341Model {
         if self.parameter_count < self.parameters.len() {
             self.parameters[self.parameter_count] = word as u8;
             self.parameter_count += 1;
+            self.last_parameters[usize::from(command)] =
+                (self.parameters, self.parameter_count as u8);
         }
         let p = self.parameters;
         let range = (
