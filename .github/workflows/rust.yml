@@ -157,7 +157,8 @@ jobs:
           timeout: 10000
           scenario: scenarios/readback.yaml
           diagram_file: diagram-chip.json
-          elf: target/riscv32imc-unknown-none-elf/release/readback
+          # Resolved from the repository root, unlike the `path`-relative wokwi.toml.
+          elf: examples/esp32c3/target/riscv32imc-unknown-none-elf/release/readback
       - name: Upload screenshots
         if: always() && steps.token.outputs.present == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
