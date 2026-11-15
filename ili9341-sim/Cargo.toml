@@ -1,0 +1,21 @@
+[package]
+name = "ili9341-sim"
+description = "A behavioral model of the Ilitek ILI9341 TFT LCD controller for tests"
+publish = false
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fake-bus.workspace = true
+ili9341-registers.workspace = true
+
+[package.metadata.release]
+release = false
