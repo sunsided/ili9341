@@ -5,6 +5,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-16
+
+[0.3.0]: https://github.com/sunsided/ili9341/releases/tag/v0.3.0
+
 ### Added
 
 - `draw_raw` writes pixel data from a byte slice in the current color depth.
