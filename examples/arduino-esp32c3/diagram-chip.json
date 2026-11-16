@@ -87,6 +87,6 @@
     ]
   ],
   "dependencies": {
-    "chip-ili9341": "github:sunsided/ili9341@0.2.0"
+    "chip-ili9341": "github:sunsided/ili9341@0.3.0"
   }
 }
