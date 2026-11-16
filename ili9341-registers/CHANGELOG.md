@@ -5,6 +5,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- No changes; the version follows `ili9341-ng`.
+
 ## [0.2.0] - 2026-11-15
 
 [0.2.0]: https://github.com/sunsided/ili9341/releases/tag/v0.2.0
